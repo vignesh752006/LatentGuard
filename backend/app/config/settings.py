@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     vdlm_patch_count: int = 576
     vdlm_embedding_dim: int = 1152
 
-    protocol_version: str = "1.0"
+    protocol_version: str = "1.1"
 
 
 @lru_cache

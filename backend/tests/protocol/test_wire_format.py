@@ -9,7 +9,7 @@ def test_wire_message_roundtrip():
     serialized = serialize_message(msg)
     parsed = parse_message(serialized)
     assert parsed["type"] == "session.init"
-    assert parsed["protocol_version"] == "1.0"
+    assert parsed["protocol_version"] == "1.1"
 
 
 def test_latent_frame_message_structure():

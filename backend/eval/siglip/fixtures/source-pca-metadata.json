@@ -1,0 +1,48 @@
+{
+  "version": "source_pca_v1",
+  "training_seed": 156017,
+  "rendered_pages": 128,
+  "source_tokens": 25088,
+  "source_dimension": 768,
+  "basis_rank": 128,
+  "input_model": "google/siglip-base-patch16-224 ONNX FP32",
+  "numpy_version": "2.5.3",
+  "onnxruntime_version": "1.31.1",
+  "pillow_version": "13.0.0",
+  "available_training_fonts": [
+    "C:\\Windows\\Fonts\\arial.ttf",
+    "C:\\Windows\\Fonts\\calibri.ttf",
+    "C:\\Windows\\Fonts\\times.ttf",
+    "C:\\Windows\\Fonts\\verdana.ttf"
+  ],
+  "basis_file_bytes": 396288,
+  "held_out_reference_mean_patch_cosine_by_rank": {
+    "32": 0.49273684024810793,
+    "64": 0.5599887371063232,
+    "128": 0.6494779229164124
+  },
+  "held_out_reference_per_image_cosine_by_rank": {
+    "32": {
+      "checkout": 0.6507528424263,
+      "login": 0.6537416577339172,
+      "natural-iss009e05944": 0.3949275612831116,
+      "natural-iss009e05953": 0.40258851647377014,
+      "natural-iss073e0763824": 0.36167362332344055
+    },
+    "64": {
+      "checkout": 0.7274289727210999,
+      "login": 0.7206662893295288,
+      "natural-iss009e05944": 0.452269971370697,
+      "natural-iss009e05953": 0.45981737971305847,
+      "natural-iss073e0763824": 0.43976107239723206
+    },
+    "128": {
+      "checkout": 0.801240861415863,
+      "login": 0.7953658103942871,
+      "natural-iss009e05944": 0.5488443970680237,
+      "natural-iss009e05953": 0.5564526915550232,
+      "natural-iss073e0763824": 0.5454858541488647
+    }
+  },
+  "training_pages_are_synthetic_rendered_ui_screenshots": true
+}

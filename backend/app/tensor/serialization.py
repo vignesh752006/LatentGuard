@@ -27,6 +27,13 @@ from app.config.settings import Settings
 from app.observability.logging import get_logger
 from app.schemas.messages import TensorPayload
 from app.security.payload_guard import PayloadRejected
+from eval.siglip.adapter import adapt_siglip_embeddings
+from eval.siglip.source_pca import (
+    MAX_COMPONENTS as SOURCE_PCA_MAX_COMPONENTS,
+    SOURCE_PATCHES,
+    load_basis as load_source_pca_basis,
+    reconstruct_source_pca,
+)
 
 logger = get_logger(__name__)
 
@@ -85,7 +92,8 @@ def _decompress_zlib_or_gzip(raw: bytes) -> bytes:
 
 def _decode_int8_quantized(
     raw: bytes,
-    contract: TensorContract,
+    patch_count: int,
+    embedding_dim: int,
 ) -> torch.Tensor:
     """Decode compact int8-quantized tensor.
 
@@ -93,8 +101,6 @@ def _decode_int8_quantized(
       [0 .. patch_count*4-1]              float32 scale per row
       [patch_count*4 .. end]              int8 values, row-major
     """
-    patch_count = contract.patch_count
-    embedding_dim = contract.embedding_dim
     scales_bytes = patch_count * 4  # float32 = 4 bytes each
     expected_total = scales_bytes + patch_count * embedding_dim
 
@@ -132,11 +138,22 @@ def decode_tensor_payload(
 
     Logs wire bytes received for every frame.
     """
-    expected_shape = list(contract.shape)
-    if payload.shape != expected_shape:
+    source_pca = payload.transform == "source_pca_v1"
+    if source_pca:
+        if (
+            payload.dtype != "int8_quantized"
+            or payload.shape[0] != SOURCE_PATCHES
+            or not 1 <= payload.shape[1] <= SOURCE_PCA_MAX_COMPONENTS
+        ):
+            raise PayloadRejected(
+                "TENSOR_SHAPE_MISMATCH",
+                f"source_pca_v1 requires int8_quantized [196, 1..{SOURCE_PCA_MAX_COMPONENTS}], "
+                f"got {payload.dtype} {payload.shape}",
+            )
+    elif payload.shape != list(contract.shape):
         raise PayloadRejected(
             "TENSOR_SHAPE_MISMATCH",
-            f"Expected shape {expected_shape}, got {payload.shape}",
+            f"Expected shape {list(contract.shape)}, got {payload.shape}",
         )
 
     element_count = payload.shape[0] * payload.shape[1]
@@ -176,7 +193,21 @@ def decode_tensor_payload(
 
     # --- int8_quantized path ---
     if payload.dtype == "int8_quantized":
-        return _decode_int8_quantized(raw, contract)
+        if source_pca:
+            quantized = _decode_int8_quantized(raw, payload.shape[0], payload.shape[1])
+            try:
+                mean, components = load_source_pca_basis()
+            except (FileNotFoundError, ValueError) as exc:
+                raise PayloadRejected(
+                    "SOURCE_PCA_BASIS_INVALID",
+                    f"Unable to load source PCA basis: {exc}",
+                ) from exc
+            source = reconstruct_source_pca(
+                quantized.numpy(), mean, components[: payload.shape[1]]
+            )
+            rebuilt = adapt_siglip_embeddings(source)
+            return torch.from_numpy(rebuilt.copy())
+        return _decode_int8_quantized(raw, contract.patch_count, contract.embedding_dim)
 
     # --- float16 / float32 path ---
     np_dtype = np.float16 if payload.dtype == "float16" else np.float32

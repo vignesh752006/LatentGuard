@@ -9,7 +9,7 @@ const DEFAULT_STATUS: AgentStatus = {
   stateVersion: 0,
   frameCount: 0,
   lastError: null,
-  visionMode: "mock",
+  visionMode: "onnx",
   processingMode: "auto",
   pipelineStage: "idle",
   tabId: null,

@@ -65,6 +65,9 @@ test("SigLIP ONNX matches five PyTorch reference fixtures and reports provider t
   if (!existsSync(modelPath) || !existsSync(wasmModelPath) || !existsSync(adapterPath)) {
     throw new Error("Missing ONNX model files; run scripts/download-siglip-onnx.py");
   }
+  if (!existsSync(path.resolve(process.cwd(), "public", "pca", "source-pca-v1.bin"))) {
+    throw new Error("Missing source PCA basis; run backend/eval/siglip/fit_source_pca.py");
+  }
 
   page.on("console", (message) => console.log(`BROWSER_${message.type()}: ${message.text()}`));
   page.on("pageerror", (error) => console.error(`BROWSER_PAGE_ERROR: ${error.message}`));
@@ -103,11 +106,44 @@ test("SigLIP ONNX matches five PyTorch reference fixtures and reports provider t
     }
   }
 
+  const loginImage = readFileSync(path.join(fixtureRoot, "images", "login.png"));
+  const loginUrl = `data:image/png;base64,${loginImage.toString("base64")}`;
+  const svdResult = await page.evaluate(
+    async ({ imageUrl, sensitiveIndices }) =>
+      window.sanitizeSiglipEmbedding(imageUrl, sensitiveIndices),
+    { imageUrl: loginUrl, sensitiveIndices: [1, 2, 24, 25, 26, 48, 49, 50] },
+  );
+  expect(svdResult.outputShape).toEqual([576, 1152]);
+  expect(svdResult.privateRank).toBeGreaterThan(0);
+  expect(svdResult.maxAbsDot).toBeLessThan(1e-4);
+
+  const pcaSummaries: Record<string, {
+    compressedBytes: number;
+    base64Bytes: number;
+    frameJsonBytes: number;
+    meanPatchCosineVsSanitized: number;
+    minimumPatchCosineVsSanitized: number;
+    meanPatchCosineVsFull: number;
+  }> = {};
+  for (const name of imageNames) {
+    const extension = name.startsWith("natural-") ? ".jpg" : ".png";
+    const image = readFileSync(path.join(fixtureRoot, "images", `${name}${extension}`));
+    const mimeType = extension === ".jpg" ? "image/jpeg" : "image/png";
+    const result = await page.evaluate(
+      (imageUrl) => window.measureSourcePca(imageUrl),
+      `data:${mimeType};base64,${image.toString("base64")}`,
+    );
+    expect(result.frameJsonBytes).toBeLessThan(45_056);
+    pcaSummaries[name] = result;
+  }
+
   await page.evaluate(() => window.closeSiglipEncoders());
   console.info("SIGLIP_PARITY_AND_LATENCY", JSON.stringify({
     scores,
     latencies,
     wireBytes,
+    realSiglipSvd: svdResult,
+    sourcePca: pcaSummaries,
     modelBytes: {
       visionFp16: statSync(modelPath).size,
       visionWasmFp32: statSync(wasmModelPath).size,

@@ -1,4 +1,4 @@
-# VDLM WebSocket Protocol v1
+# VDLM WebSocket Protocol v1.1
 
 Transport: WebSocket at `/ws/v1/session` (JSON envelopes).
 
@@ -7,7 +7,7 @@ Transport: WebSocket at `/ws/v1/session` (JSON envelopes).
 ```json
 {
   "type": "<message_type>",
-  "protocol_version": "1.0",
+  "protocol_version": "1.1",
   "session_id": "<uuid>",
   "timestamp_ms": 1234567890,
   "payload": { }
@@ -170,4 +170,31 @@ The server rejects messages containing any of:
 | Uncompressed size | ~1.27 MB |
 | Target wire size | <45 KB (client-side quantization/compression/delta) |
 
-Backend accepts full tensors for development; production clients should use compact encodings declared in `tensor.compression`.
+Backend accepts full tensors for development. The source-PCA `transform` added
+in protocol v1.1 is the measured compact representation; its size and fidelity
+trade-off are documented in `docs/ASSUMPTIONS.md`.
+
+### Experimental source-PCA tensor (`protocol_version: 1.1`)
+
+Source-PCA payloads carry quantized SigLIP patch coefficients. The server
+reconstructs the 196×768 source grid from its checked-in `source_pca_v1` basis,
+then applies the deterministic 14×14→24×24 adapter and 768→1152 projection.
+Spatial metadata and planner input remain on the existing 24×24/576×1152
+contract.
+
+```json
+{
+  "encoding": "base64",
+  "dtype": "int8_quantized",
+  "shape": [196, 64],
+  "data": "<zlib-compressed row scales and int8 PCA coefficients>",
+  "compression": "zlib",
+  "transform": "source_pca_v1"
+}
+```
+
+`transform` is omitted for standard 576×1152 tensor payloads. The default
+source-PCA mode uses 64 components from the shared rank-128 basis. Its measured
+wire size and reconstruction cosine are documented in
+`docs/ASSUMPTIONS.md`; the compact representation is experimental and can lose
+substantial feature fidelity.

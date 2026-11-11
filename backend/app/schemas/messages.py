@@ -57,6 +57,7 @@ class TensorPayload(BaseModel):
     data: str
     compression: Literal["none", "zlib", "delta"] = "none"
     delta_base_frame_id: str | None = None
+    transform: Literal["source_pca_v1"] | None = None
 
     @field_validator("shape")
     @classmethod
@@ -149,7 +150,7 @@ class ErrorPayload(BaseModel):
 
 class WireMessage(BaseModel):
     type: str
-    protocol_version: str = "1.0"
+    protocol_version: str = "1.1"
     session_id: str | None = None
     timestamp_ms: int | None = None
     payload: dict[str, Any]

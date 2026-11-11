@@ -15,14 +15,14 @@ your browser (chrome extension)              your laptop (python backend)
 ─────────────────────────────────            ─────────────────────────────
 1. captures the visible tab locally          4. receives sanitized tensor V' only
 2. scans page for sensitive field boxes      5. never gets screenshot / password text
-3. webgpu "vision" + vdlm sanitization  ──►  6. mock planner picks an action
+3. ONNX SigLIP + local SVD sanitization ──►  6. mock planner picks an action
    sends V' over websocket                       (click / scroll / type)
 7. executes click/scroll in the page      ◄──  8. sends action.directive back
 ```
 
 **real today:** chrome extension architecture, tab capture, dom sensitivity scan, websocket protocol, tensor shape validation, stale-state checks, action execution in the browser.
 
-**mocked today:** vision defaults to the procedural mock unless `visionMode` is `onnx`; the real ONNX path uses SigLIP with an FP16 WebGPU model and an FP32 WASM fallback. The planner uses keyword rules, VDLM math is simplified, and there is no cryptographic privacy proof.
+**implemented today:** ONNX SigLIP is the default vision mode (FP16 WebGPU with FP32 WASM fallback); the procedural mock is available only as an explicit test mode. SVD null-space sanitization is the default (k=4), with a rank-1 baseline. The planner still uses keyword rules, and there is no cryptographic privacy proof.
 
 ---
 
@@ -141,7 +141,7 @@ click the vdlm icon. you will see:
 
 - backend websocket url (leave as `ws://127.0.0.1:8080/ws/v1/session`)
 - task intent (text box)
-- vision mode dropdown — **leave on "mock (webgpu encoder)"**
+- vision mode dropdown — **ONNX SigLIP** by default; mock is test-only
 - start / stop buttons
 - status section at the bottom
 
@@ -168,7 +168,7 @@ connected: yes
 stage: processing   (cycles through capturing / processing / transmitting)
 session: <some uuid>
 frames: 1, 2, 3 ... (number goes up every ~1.5s)
-vision: mock
+vision: onnx
 ```
 
 **in the backend terminal:**
@@ -250,8 +250,8 @@ smart-privacy-agent/
 - chrome manifest v3 extension with offscreen document
 - visible tab capture stays on device — **raw screenshot is not sent to backend**
 - dom scanner finds password/input field **bounding boxes** (geometry only, not text values)
-- webgpu compute shaders run locally (vision encode + vdlm projection shaders)
-- sanitized tensor `V'` sent as fp16 base64 over websocket
+- ONNX SigLIP runs locally (WebGPU when available, WASM otherwise); SVD sanitization runs locally on CPU
+- sanitized `V'` is sent as fp16 by default; experimental source-PCA mode sends a reduced `196×768` source representation
 - backend rejects forbidden fields (screenshot, dom html, credentials)
 - session uuid, frame ids, state_version sync
 - stale plan detection when page state drifts
@@ -262,12 +262,13 @@ smart-privacy-agent/
 
 | part | what the demo actually does |
 |------|----------------------------|
-| **vision encoder** | Procedural mock is the default; configured `onnx` mode runs the SigLIP vision tower |
-| **onnx / siglip mode** | Requires local FP16, FP32 fallback, and adapter models; ONNX mode does not silently fall back to the mock |
-| **vdlm sanitization** | simplified rank-1 style gpu projection — **not** full svd null-space from the research paper |
+| **vision encoder** | ONNX SigLIP runs by default; the procedural encoder is an explicit test mode |
+| **onnx / siglip mode** | Requires local FP16, FP32 fallback, and adapter models; missing or invalid models raise an error and never silently use the mock |
+| **VDLM sanitization** | CPU SVD null-space projection is the default (k=4); rank-1 is selectable as a baseline. This is not a formal privacy guarantee |
+| **source PCA payload** | Experimental compact mode projects sanitized 196×768 SigLIP tokens; backend rebuilds the 576×1152 tensor. Five-fixture JSON wire frames averaged 15,666 B (<45 KB), but mean patch cosine was 0.497 vs. the full adapted sanitized tensor |
 | **backend planner** | `VDLM_MODEL_PROVIDER=mock` — keyword rules (`scroll` → scroll, `click` → click at dominant patch). **not** llama-3-70b reasoning |
 | **llama provider** | code stub exists (`llama_planner.py`) but needs a separate openai-compatible api server + api key |
-| **payload size** | Default sends the full ~1.3 MB fp16 tensor; measured compact real embeddings and lower-dimensional projections still do **not** meet the `<45 KB` Base64-wire target without severe fidelity loss |
+| **payload size** | Standard mode sends a full adapted tensor. The experimental PCA wire size and reconstruction fidelity are recorded in `docs/ASSUMPTIONS.md`; small projections may lose substantial signal |
 | **privacy guarantees** | no zero-knowledge proof, no cryptographic attestation, no adversarial inversion testing |
 | **wasm patch mapper** | rust source is in repo but wasm binary is **not** prebuilt — demo uses typescript fallback unless you run `npm run build:wasm` with rust installed |
 
@@ -278,7 +279,7 @@ smart-privacy-agent/
 these are the main gaps between this prototype and the full research blueprint:
 
 1. replace keyword mock planner with **visual grounding** or llama/vlm that uses page information
-2. stronger **null-space sanitization** (multi-basis / svd, not rank-1 mean)
+2. measure sanitizer utility and privacy against the inversion benchmark
 3. ship prebuilt **rust wasm** patch mapper in the default path
 4. reduce payloads toward 45 KB without the measured fidelity loss
 5. **feature inversion evaluation** harness
@@ -289,28 +290,30 @@ these are the main gaps between this prototype and the full research blueprint:
 
 ## configuration (usually you can ignore this)
 
-### Optional real SigLIP ONNX encoder
+### SigLIP ONNX encoder (default)
 
-The extension's mock encoder remains the default. To enable the real encoder,
-install the Python export dependencies and export all three local ONNX models:
+Install the export dependencies and create the local ONNX models and source-PCA
+basis:
 
 ```powershell
 python -m pip install -e "backend[siglip-eval]"
 python scripts/download-siglip-onnx.py --out-dir client/public/models
+python backend/eval/siglip/fit_source_pca.py
 ```
 
 For the PowerShell wrapper use `scripts/download-siglip-onnx.ps1`; on
 POSIX-compatible systems use `scripts/download-siglip-onnx.sh`. The wrappers
-export the public `google/siglip-base-patch16-224` checkpoint. Configure
-`visionMode` as `onnx` and `onnxModelUrl` as the served FP16 vision model URL in
-extension settings. ONNX mode tries the FP16 graph with WebGPU, then uses the
+export the public `google/siglip-base-patch16-224` checkpoint. The popup
+defaults to ONNX mode and the packaged FP16 model URL. ONNX mode tries the FP16 graph with WebGPU, then uses the
 FP32 graph on WASM; either path reports a clear initialization error if its
 required model or the adapter is missing or invalid. It never substitutes mock
 embeddings. Local model files are ignored by git and are copied into `client/dist`
-by Vite when present. See
+by Vite when present. The popup checks for missing model files and displays a
+setup error; select **Mock (test mode)** only when intentionally testing the
+procedural encoder. Source PCA payload mode requires the fitted basis. See
 [backend/eval/siglip/README.md](backend/eval/siglip/README.md) for reference
-fixtures, exact preprocessing, measured payload sizes, export details, and
-parity/latency tests.
+fixtures, exact preprocessing, PCA fit, measured payload sizes, export details,
+and parity/latency tests.
 
 backend `.env`:
 
@@ -371,11 +374,11 @@ terminal 1 must be running. check port 8080 is not used by another app.
 1. show backend terminal already running on :8080
 2. show extension loaded in chrome
 3. open https://example.com
-4. open popup → task: `Scroll down the page` → vision: mock → **start**
+4. open popup → task: `Scroll down the page` → vision: ONNX (or choose Mock test mode if models are not installed) → **start**
 5. point at popup: `connected: yes`, frames counting up
 6. point at backend logs: `latent_frame_received`, `action_planned`
 7. page scrolls (or click task if scroll is hard to see)
-8. say clearly: *"the default demo uses a procedural mock vision encoder and mock planner; the optional ONNX mode runs SigLIP locally. Neither path establishes a privacy guarantee, and planning remains a keyword-based prototype."*
+8. say clearly: *"ONNX mode runs SigLIP locally by default; the procedural mock is for explicit testing. SVD sanitization and PCA compression have measured behavior but no formal privacy guarantee, and planning remains a keyword-based prototype."*
 9. click **stop**
 
 ---

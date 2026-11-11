@@ -1,6 +1,7 @@
 """Fixed 768-to-1152 projection shared with the TypeScript implementation."""
 
 import math
+from functools import lru_cache
 
 import numpy as np
 
@@ -9,6 +10,7 @@ OUTPUT_DIM = 1152
 PROJECTION_SEED = 0xDEADBEEF
 
 
+@lru_cache(maxsize=1)
 def build_projection_matrix() -> np.ndarray:
     """Return row-major float32 weights using the shared uint32 LCG algorithm."""
     state = PROJECTION_SEED

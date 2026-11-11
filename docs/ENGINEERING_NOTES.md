@@ -2,11 +2,11 @@
 
 ## Blueprint inconsistencies acknowledged
 
-1. **Payload size vs. tensor size**: Real adapted SigLIP FP16 `576×1152` frames average 1,225,180 bytes with zlib; per-row int8 averages 611,811 bytes and top-10% sparsity averages 139,001 bytes. A 64-dimensional random projection compresses to a 37,469-byte mean binary body, but averages only 0.241391 reconstructed per-patch cosine and expands to 49,959 Base64 bytes. The `<45 KB` target is not met on the current wire format; measurements and setup are in `docs/ASSUMPTIONS.md`.
+1. **Payload size vs. tensor size**: Real adapted SigLIP FP16 `576×1152` frames average 1,225,069 compressed bytes; per-row int8 averages 611,777 bytes. A 64-dimensional adapter-space random projection misses the 45 KB Base64 target. Source-grid PCA reaches a 15,666-byte mean serialized JSON frame but averages only 0.497006 per-patch cosine against the full adapted sanitized tensor (minimum observed patch cosine -0.176877). The target is reached at a significant, image-dependent fidelity cost; see `docs/ASSUMPTIONS.md`.
 
 2. **"Text-only LLM" on spatial latents**: LLaMA-3-70B-Instruct is text-only; interpreting raw 576×1152 vision embeddings requires either (a) a learned projection head trained on sanitized latents, or (b) a VLM decoder. This implementation passes a **derived spatial summary** (patch statistics + grid features) to the text planner as an interim bridge, with a clear interface for a future VLM decoder module.
 
-3. **SVD in WGSL**: Client-side null-space projection is specified for WebGPU; server never performs VDLM sanitization.
+3. **SVD execution**: The default multi-rank sanitizer is a CPU implementation in the offscreen extension; the backend receives sanitized tensors and does not perform privacy sanitization.
 
 ## Module boundaries
 

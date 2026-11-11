@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = "1.0";
+export const PROTOCOL_VERSION = "1.1";
 
 export const TENSOR_CONTRACT = {
   modelId: "siglip-base-patch16-224",
@@ -48,6 +48,7 @@ export interface TensorPayload {
   data: string;
   compression: "none" | "zlib" | "delta";
   delta_base_frame_id?: string | null;
+  transform?: "source_pca_v1";
 }
 
 export interface SanitizationProvenance {

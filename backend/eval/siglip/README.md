@@ -77,15 +77,45 @@ python backend/eval/siglip/measure_payloads.py
 The script applies the shared 768→1152 adapter to the five reference arrays,
 then measures fp16/zlib and per-row int8/zlib sizes, optional top-10% sparsity,
 and seeded orthogonal random projections to 256, 128, and 64 dimensions. On
-these five images, mean compressed binary sizes were 1,225,180 bytes (fp16),
-611,811 bytes (int8), and 139,001 bytes (int8 with top-10% sparsity). The
-projection sizes and reconstructed per-patch cosine were 140,193 bytes / 0.474137
-(256D), 71,765 bytes / 0.339956 (128D), and 37,469 bytes / 0.241391 (64D).
-The 64D Base64 body averages 49,959 bytes before JSON metadata, so the 45 KB
-wire target is not met. For a projected tensor, cosine fidelity is the
+these five images, mean compressed binary sizes were 1,225,069 bytes (fp16),
+611,777 bytes (int8), and 139,009 bytes (int8 with top-10% sparsity). The
+projection sizes and reconstructed per-patch cosine were 140,178 bytes / 0.474077
+(256D), 71,750 bytes / 0.339937 (128D), and 37,460 bytes / 0.241495 (64D).
+The 64D Base64 body averages 49,947 bytes before JSON metadata, so that
+adapter-space projection misses the 45 KB wire target. The separate source-grid
+PCA mode reaches the target at lower measured fidelity, as detailed below. For
+a projected tensor, cosine fidelity is the
 per-patch cosine between the original adapted row and its reconstruction
 through the transpose of the orthonormal projection basis. Compressed sizes
 are binary bytes before Base64 and JSON framing.
+
+## Source-grid PCA payload
+
+The compact protocol option sends 196 source-grid tokens instead of the
+576-patch adapted tensor. To fit the shipped basis, first export the FP32 ONNX
+vision model, then run:
+
+```powershell
+python backend/eval/siglip/fit_source_pca.py
+```
+
+The deterministic fitter renders 128 varied UI-page screenshots, runs each
+through the real `google/siglip-base-patch16-224` FP32 ONNX vision tower, and
+fits a centered PCA basis over the resulting 25,088 patch embeddings. It saves
+the mean plus 128 components as `client/public/pca/source-pca-v1.bin`; metadata
+records the seed, software versions, page count, and held-out reference
+fidelity. The rendered training pages are synthetic; their embeddings are
+model outputs, not fabricated vectors. No page screenshots are retained.
+
+The default compact payload uses the first 64 PCA components, per-row int8
+quantization and zlib. The client applies the configured SVD or rank-1
+sanitizer to the 196×768 source tokens before projection. The backend
+dequantizes, reconstructs the source grid with the shared basis, and applies
+the same deterministic 14×14→24×24 adapter and fixed projection to produce
+the planner's 576×1152 tensor. Python decoder round-trip coverage is in
+`backend/tests/unit/test_tensor.py`; the browser parity test reports Base64
+wire bytes and cosine similarity against the full adapted sanitized tensor on
+the five fixed reference images. Action accuracy has not yet been measured.
 
 ## Projection matrix
 

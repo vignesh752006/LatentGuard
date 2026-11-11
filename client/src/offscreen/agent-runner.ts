@@ -17,11 +17,17 @@ import { persistStatusFromOffscreen } from "../storage/agent-status";
 import { decodeCaptureToImageData } from "../capture/decode";
 import { buildLatentFramePayload, hashViewport } from "../protocol/serializer";
 import { VisionEncoder } from "../vision/mock-gpu-encoder";
-import { VdlmSanitizer } from "../vdlm/sanitizer";
+import { sanitizeRankOne, sanitizeSVD } from "../vdlm/svd-sanitizer";
+import {
+  loadSourcePcaBasis,
+  projectSourcePca,
+  SOURCE_PCA_DEFAULT_COMPONENTS,
+} from "../vision/source-pca";
 
 type VisionEncoderLike = {
   init(): Promise<void>;
   encode(image: ImageData): Promise<Float32Array>;
+  encodePatches?(image: ImageData): Promise<Float32Array>;
 };
 
 const persistStatus = persistStatusFromOffscreen;
@@ -73,7 +79,6 @@ export class OffscreenAgentRunner {
   private loopTimer: ReturnType<typeof setTimeout> | null = null;
   private sessionReadyWaiters: Array<(id: string) => void> = [];
   private visionEncoder: VisionEncoderLike | null = null;
-  private sanitizer: VdlmSanitizer | null = null;
   private pipelineReady = false;
 
   async start(tabId: number, config?: ClientConfig): Promise<void> {
@@ -135,8 +140,6 @@ export class OffscreenAgentRunner {
 
   private async ensurePipeline(): Promise<void> {
     if (this.pipelineReady) return;
-    this.sanitizer = new VdlmSanitizer();
-    await this.sanitizer.init();
     if (this.config?.visionMode === "onnx") {
       const { OnnxVisionEncoder } = await import("../vision/onnx-encoder");
       this.visionEncoder = new OnnxVisionEncoder(this.config.onnxModelUrl);
@@ -223,17 +226,54 @@ export class OffscreenAgentRunner {
       const imageData = await decodeCaptureToImageData(captureJpeg);
       mark("decode", t);
 
-      t = performance.now();
-      const embeddings = await this.visionEncoder!.encode(imageData);
-      mark("encode", t);
-
-      t = performance.now();
-      const sanitized = await this.sanitizer!.sanitize(
-        embeddings,
-        sensitivity.sensitivePatchIndices,
-      );
-      embeddings.fill(0);
-      mark("sanitize", t);
+      const sanitizerMethod = this.config.sanitizerMode === "rank1" ? "rank1" : "svd";
+      let sanitized: Float32Array | undefined;
+      let sourcePcaCoefficients: Float32Array | undefined;
+      let pcaComponentCount: number | undefined;
+      let encodeStart = performance.now();
+      if (this.config.payloadMode === "source-pca") {
+        if (!this.visionEncoder?.encodePatches) {
+          throw new Error("Source PCA payloads require ONNX SigLIP mode; Mock test mode cannot produce source tokens.");
+        }
+        const source = await this.visionEncoder.encodePatches(imageData);
+        mark("encode", encodeStart);
+        encodeStart = performance.now();
+        const sourceIndices = mapTargetIndicesToSourceGrid(sensitivity.sensitivePatchIndices);
+        const sanitizedSource = sanitizerMethod === "rank1"
+          ? sanitizeRankOne(
+            source,
+            sourceIndices,
+            this.config.sanitizerAlpha,
+            { patchCount: 196, embeddingDim: 768 },
+          )
+          : sanitizeSVD(source, sourceIndices, {
+            k: this.config.sanitizerK,
+            alpha: this.config.sanitizerAlpha,
+            patchCount: 196,
+            embeddingDim: 768,
+          }).sanitized;
+        const basis = await loadSourcePcaBasis();
+        pcaComponentCount = SOURCE_PCA_DEFAULT_COMPONENTS;
+        sourcePcaCoefficients = projectSourcePca(
+          sanitizedSource,
+          basis,
+          pcaComponentCount,
+        );
+        source.fill(0);
+        sanitizedSource.fill(0);
+      } else {
+        const embeddings = await this.visionEncoder!.encode(imageData);
+        mark("encode", encodeStart);
+        encodeStart = performance.now();
+        sanitized = sanitizerMethod === "rank1"
+          ? sanitizeRankOne(embeddings, sensitivity.sensitivePatchIndices, this.config.sanitizerAlpha)
+          : sanitizeSVD(embeddings, sensitivity.sensitivePatchIndices, {
+            k: this.config.sanitizerK,
+            alpha: this.config.sanitizerAlpha,
+          }).sanitized;
+        embeddings.fill(0);
+      }
+      mark("sanitize", encodeStart);
 
       t = performance.now();
       const viewportHash = await hashViewport(
@@ -245,13 +285,18 @@ export class OffscreenAgentRunner {
       const latentFrame = buildLatentFramePayload({
         frameId,
         stateVersion: stateVersion.stateVersion,
-        sanitizedMatrix: sanitized,
+        ...(sanitized ? { sanitizedMatrix: sanitized } : {}),
+        ...(sourcePcaCoefficients ? { sourcePcaCoefficients, pcaComponentCount } : {}),
         sensitivePatchIndices: sensitivity.sensitivePatchIndices,
         viewportHash,
         lastActionId: null,
         compress: this.config.compressPayload,
+        sanitizationMethod: sanitizerMethod === "svd"
+          ? `svd_nullspace_k${this.config.sanitizerK}`
+          : "rank1_nullspace_baseline",
       });
-      sanitized.fill(0);
+      sanitized?.fill(0);
+      sourcePcaCoefficients?.fill(0);
       mark("serialize", t);
 
       t = performance.now();
@@ -367,6 +412,19 @@ export class OffscreenAgentRunner {
       });
     });
   }
+}
+
+export function mapTargetIndicesToSourceGrid(targetIndices: number[]): number[] {
+  const mapped = new Set<number>();
+  for (const index of targetIndices) {
+    if (!Number.isInteger(index) || index < 0 || index >= 24 * 24) continue;
+    const row = Math.floor(index / 24);
+    const col = index % 24;
+    const sourceRow = Math.min(13, Math.floor((row + 0.5) * 14 / 24));
+    const sourceCol = Math.min(13, Math.floor((col + 0.5) * 14 / 24));
+    mapped.add(sourceRow * 14 + sourceCol);
+  }
+  return [...mapped];
 }
 
 let runner: OffscreenAgentRunner | null = null;

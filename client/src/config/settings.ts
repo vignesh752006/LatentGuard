@@ -1,5 +1,7 @@
 export type VisionMode = "mock" | "onnx";
 export type ProcessingMode = "auto" | "mock" | "webgpu";
+export type SanitizerMode = "svd" | "rank1";
+export type PayloadMode = "standard" | "source-pca";
 
 export interface ClientConfig {
   backendWsUrl: string;
@@ -7,6 +9,10 @@ export interface ClientConfig {
   visionMode: VisionMode;
   processingMode: ProcessingMode;
   onnxModelUrl: string;
+  sanitizerMode: SanitizerMode;
+  sanitizerK: number;
+  sanitizerAlpha: number;
+  payloadMode: PayloadMode;
   frameIntervalMs: number;
   compressPayload: boolean;
 }
@@ -14,9 +20,13 @@ export interface ClientConfig {
 export const DEFAULT_CONFIG: ClientConfig = {
   backendWsUrl: "ws://127.0.0.1:8080/ws/v1/session",
   taskIntent: "Navigate and interact with the page safely",
-  visionMode: "mock",
+  visionMode: "onnx",
   processingMode: "auto",
-  onnxModelUrl: "",
+  onnxModelUrl: "/models/siglip-base-patch16-224-vision-fp16.onnx",
+  sanitizerMode: "svd",
+  sanitizerK: 4,
+  sanitizerAlpha: 0.01,
+  payloadMode: "standard",
   frameIntervalMs: 1500,
   compressPayload: false,
 };

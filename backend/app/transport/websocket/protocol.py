@@ -10,7 +10,7 @@ def build_message(
     payload: dict[str, Any],
     *,
     session_id: str | None = None,
-    protocol_version: str = "1.0",
+    protocol_version: str = "1.1",
 ) -> dict[str, Any]:
     return WireMessage(
         type=msg_type,

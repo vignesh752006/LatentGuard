@@ -1,9 +1,20 @@
 import { OnnxVisionEncoder, SIGLIP_DIM } from "../../src/vision/onnx-encoder";
 import {
+  buildLatentFramePayload,
   encodeCompactTensorPayload,
   encodeTensorPayload,
+  decodeBase64ToUint8,
 } from "../../src/protocol/serializer";
 import type { TensorPayload } from "../../src/protocol/messages";
+import { serializeLatentFrame } from "../../src/protocol/websocket-client";
+import { sanitizeSVD } from "../../src/vdlm/svd-sanitizer";
+import {
+  loadSourcePcaBasis,
+  projectSourcePca,
+  reconstructSourcePca,
+  SOURCE_PCA_DEFAULT_COMPONENTS,
+} from "../../src/vision/source-pca";
+import { unzlibSync } from "fflate";
 
 type Provider = "webgpu" | "wasm";
 type EncoderResult = {
@@ -32,6 +43,19 @@ declare global {
     ) => Promise<EncoderResult>;
     verifySyntheticDeterminism: (modelUrl: string) => Promise<boolean>;
     closeSiglipEncoders: () => void;
+    sanitizeSiglipEmbedding: (imageUrl: string, sensitiveIndices: number[]) => Promise<{
+      outputShape: number[];
+      privateRank: number;
+      maxAbsDot: number;
+    }>;
+    measureSourcePca: (imageUrl: string) => Promise<{
+      compressedBytes: number;
+      base64Bytes: number;
+      frameJsonBytes: number;
+      meanPatchCosineVsSanitized: number;
+      minimumPatchCosineVsSanitized: number;
+      meanPatchCosineVsFull: number;
+    }>;
   }
 }
 
@@ -115,3 +139,135 @@ window.closeSiglipEncoders = () => {
   for (const encoder of encoders.values()) encoder.destroy();
   encoders.clear();
 };
+
+window.sanitizeSiglipEmbedding = async (imageUrl, sensitiveIndices) => {
+  const encoder = await getWasmEncoder();
+  const embedding = await encoder.encode(await imageDataFromUrl(imageUrl));
+  const { sanitized, privateBasis } = sanitizeSVD(embedding, sensitiveIndices, {
+    k: 4,
+    alpha: 0,
+  });
+  let maxAbsDot = 0;
+  for (let patch = 0; patch < 576; patch++) {
+    for (let rank = 0; rank < privateBasis.length / 1152; rank++) {
+      let dot = 0;
+      for (let dim = 0; dim < 1152; dim++) {
+        dot += sanitized[patch * 1152 + dim]! * privateBasis[rank * 1152 + dim]!;
+      }
+      maxAbsDot = Math.max(maxAbsDot, Math.abs(dot));
+    }
+  }
+  return { outputShape: [576, 1152], privateRank: privateBasis.length / 1152, maxAbsDot };
+};
+
+window.measureSourcePca = async (imageUrl) => {
+  const encoder = await getWasmEncoder();
+  const source = await encoder.encodePatches(await imageDataFromUrl(imageUrl));
+  const original = await encoder.adaptPatches(source);
+  const sensitiveSourceIndices = [1, 2, 24, 25, 26, 48, 49, 50].map((index) => {
+    const row = Math.floor(index / 24);
+    const col = index % 24;
+    return Math.min(13, Math.floor((row + 0.5) * 14 / 24)) * 14 +
+      Math.min(13, Math.floor((col + 0.5) * 14 / 24));
+  });
+  const sanitizedSource = sanitizeSVD(source, [...new Set(sensitiveSourceIndices)], {
+    k: 4,
+    alpha: 0,
+    patchCount: 196,
+    embeddingDim: 768,
+  }).sanitized;
+  const fullSanitized = await encoder.adaptPatches(sanitizedSource);
+  const basis = await loadSourcePcaBasis();
+  const coefficients = projectSourcePca(
+    sanitizedSource,
+    basis,
+    SOURCE_PCA_DEFAULT_COMPONENTS,
+  );
+  const frame = buildLatentFramePayload({
+    frameId: "pca-measurement",
+    stateVersion: 1,
+    sourcePcaCoefficients: coefficients,
+    pcaComponentCount: SOURCE_PCA_DEFAULT_COMPONENTS,
+    sensitivePatchIndices: [],
+    viewportHash: "measurement",
+    lastActionId: null,
+    sanitizationMethod: "svd_nullspace_k4",
+  });
+  const payload = frame.tensor;
+  const raw = unzlibSync(decodeBase64ToUint8(payload.data));
+  const scales = new Float32Array(raw.buffer, raw.byteOffset, 196);
+  const quantized = new Int8Array(raw.buffer, raw.byteOffset + 196 * 4);
+  const dequantized = new Float32Array(coefficients.length);
+  for (let patch = 0; patch < 196; patch++) {
+    for (let component = 0; component < SOURCE_PCA_DEFAULT_COMPONENTS; component++) {
+      const offset = patch * SOURCE_PCA_DEFAULT_COMPONENTS + component;
+      dequantized[offset] = quantized[offset]! * scales[patch]! / 127;
+    }
+  }
+  const reconstructedSource = reconstructSourcePca(
+    dequantized,
+    basis,
+    SOURCE_PCA_DEFAULT_COMPONENTS,
+  );
+  const reconstructed = await encoder.adaptPatches(reconstructedSource);
+  let cosineSum = 0;
+  let cosineMin = 1;
+  let fullCosineSum = 0;
+  for (let patch = 0; patch < 576; patch++) {
+    let dot = 0;
+    let normA = 0;
+    let normB = 0;
+    let fullDot = 0;
+    let fullNormA = 0;
+    let fullNormB = 0;
+    for (let dim = 0; dim < 1152; dim++) {
+      const a = fullSanitized[patch * 1152 + dim]!;
+      const full = original[patch * 1152 + dim]!;
+      const b = reconstructed[patch * 1152 + dim]!;
+      dot += a * b;
+      normA += a * a;
+      normB += b * b;
+      fullDot += full * b;
+      fullNormA += full * full;
+      fullNormB += b * b;
+    }
+    const cosine = dot / (Math.sqrt(normA * normB) + 1e-12);
+    cosineSum += cosine;
+    cosineMin = Math.min(cosineMin, cosine);
+    fullCosineSum += fullDot / (Math.sqrt(fullNormA * fullNormB) + 1e-12);
+  }
+  return {
+    compressedBytes: decodeBase64ToUint8(payload.data).byteLength,
+    base64Bytes: payload.data.length,
+    frameJsonBytes: new TextEncoder().encode(
+      serializeLatentFrame(frame, "pca-measurement-session"),
+    ).byteLength,
+    meanPatchCosineVsSanitized: cosineSum / 576,
+    minimumPatchCosineVsSanitized: cosineMin,
+    meanPatchCosineVsFull: fullCosineSum / 576,
+  };
+};
+
+async function getWasmEncoder(): Promise<OnnxVisionEncoder> {
+  let encoder = encoders.get("wasm");
+  if (!encoder) {
+    encoder = new OnnxVisionEncoder(
+      "/models/siglip-base-patch16-224-vision-fp16.onnx",
+      ["wasm"],
+    );
+    await encoder.init();
+    encoders.set("wasm", encoder);
+  }
+  return encoder;
+}
+
+async function imageDataFromUrl(imageUrl: string): Promise<ImageData> {
+  const image = new Image();
+  image.src = imageUrl;
+  await image.decode();
+  const canvas = new OffscreenCanvas(image.width, image.height);
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Could not create fixture image canvas");
+  context.drawImage(image, 0, 0);
+  return context.getImageData(0, 0, image.width, image.height);
+}

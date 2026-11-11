@@ -1,6 +1,7 @@
 """Compare the exported FP16 ONNX vision graph with the HF reference fixtures."""
 
 from pathlib import Path
+import os
 
 import numpy as np
 import onnxruntime as ort
@@ -23,18 +24,33 @@ IMAGE_FIXTURES = (
 )
 
 
+def _require_model_file(path: Path, message: str) -> None:
+    if path.is_file():
+        return
+    if os.environ.get("CI", "").lower() == "true":
+        pytest.fail(message)
+    pytest.skip(message)
+
+
 @pytest.fixture(scope="module")
 def session() -> ort.InferenceSession:
-    if not MODEL.is_file():
-        pytest.skip("Export the local SigLIP ONNX models before running parity tests")
+    _require_model_file(MODEL, "Export the local SigLIP ONNX models before running parity tests")
     return ort.InferenceSession(str(MODEL), providers=["CPUExecutionProvider"])
 
 
 @pytest.fixture(scope="module")
 def adapter_session() -> ort.InferenceSession:
-    if not ADAPTER_MODEL.is_file():
-        pytest.skip("Export the local SigLIP ONNX models before running adapter parity tests")
+    _require_model_file(
+        ADAPTER_MODEL,
+        "Export the local SigLIP ONNX adapter before running parity tests",
+    )
     return ort.InferenceSession(str(ADAPTER_MODEL), providers=["CPUExecutionProvider"])
+
+
+def test_missing_model_is_failure_when_ci_true(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("CI", "true")
+    with pytest.raises(pytest.fail.Exception, match="Export the local model"):
+        _require_model_file(tmp_path / "missing.onnx", "Export the local model before parity tests")
 
 
 def load_pixels(path: Path) -> np.ndarray:

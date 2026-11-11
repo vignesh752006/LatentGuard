@@ -7,6 +7,11 @@ import {
   type TensorPayload,
 } from "./messages";
 import { ATTESTATION_SCHEME, buildAttestation } from "./attestation";
+import {
+  SOURCE_PCA_DEFAULT_COMPONENTS,
+  SOURCE_PCA_MAX_COMPONENTS,
+  SOURCE_PCA_VERSION,
+} from "../vision/source-pca";
 
 const FORBIDDEN_KEYS =
   /screenshot|raw_pixels?|image_data|dom_html|password|credential|payment/i;
@@ -95,7 +100,9 @@ export function encodeTensorPayload(
 export function buildLatentFramePayload(params: {
   frameId: string;
   stateVersion: number;
-  sanitizedMatrix: Float32Array;
+  sanitizedMatrix?: Float32Array;
+  sourcePcaCoefficients?: Float32Array;
+  pcaComponentCount?: number;
   sensitivePatchIndices: number[];
   viewportHash: string;
   lastActionId: string | null;
@@ -104,6 +111,7 @@ export function buildLatentFramePayload(params: {
   scoreGrid?: Float32Array | null;
   /** Task 10: shader/model version string for attestation. Defaults to "0.1.0". */
   shaderVersion?: string;
+  sanitizationMethod?: string;
 }): LatentFramePayload {
   let scoreGridField: ScoreGrid | undefined;
   if (params.scoreGrid && params.scoreGrid.length === TENSOR_CONTRACT.patchCount) {
@@ -116,9 +124,14 @@ export function buildLatentFramePayload(params: {
   const payload: LatentFramePayload = {
     frame_id: params.frameId,
     state_version: params.stateVersion,
-    tensor: encodeTensorPayload(params.sanitizedMatrix, {
-      compress: params.compress ?? false,
-    }),
+    tensor: params.sourcePcaCoefficients
+      ? encodeSourcePcaTensorPayload(
+        params.sourcePcaCoefficients,
+        params.pcaComponentCount ?? SOURCE_PCA_DEFAULT_COMPONENTS,
+      )
+      : encodeTensorPayload(params.sanitizedMatrix ?? new Float32Array(0), {
+        compress: params.compress ?? false,
+      }),
     spatial_metadata: {
       patch_grid: {
         rows: TENSOR_CONTRACT.gridRows,
@@ -133,7 +146,7 @@ export function buildLatentFramePayload(params: {
     },
     provenance: {
       vdlm_shader_version: "0.1.0",
-      sanitization_method: "null_space_projection",
+      sanitization_method: params.sanitizationMethod ?? "null_space_projection",
       attestation: null,
       attestation_scheme: ATTESTATION_SCHEME,
     },
@@ -150,13 +163,9 @@ export function buildLatentFramePayload(params: {
  *   [0..2303]       Float32Array(576) — per-row scale factors (max(abs(row)))
  *   [2304..665855]  Int8Array(576*1152) — quantized row values, row-major
  *
- * Measured sizes on SigLIP-like random fp16 data:
- *   - fp16 uncompressed:  1,327,104 bytes (~1.27 MB)
- *   - int8 uncompressed:    665,856 bytes
- *   - int8 + zlib:          ~90-120 KB (random data; real SigLIP embeddings have more
- *                           structure and may compress to ~60-90 KB)
- *   - True <45 KB target requires a learned/PCA projection to lower dimensionality
- *     (e.g. 576x256 or 196x768 projected). Documented in docs/ASSUMPTIONS.md.
+ * This encodes the full 576×1152 adapted tensor and does not meet the 45 KB
+ * target on real SigLIP inputs. The source-grid PCA representation is encoded
+ * separately by encodeSourcePcaTensorPayload.
  *
  * @param topKPercent  fraction [0,1] of values to retain by absolute magnitude
  *                     per row; 0 = keep all; 0.1 = keep top 10%.
@@ -238,6 +247,61 @@ export function encodeCompactTensorPayload(
   };
 }
 
+export function encodeSourcePcaTensorPayload(
+  coefficients: Float32Array,
+  componentCount: number,
+): TensorPayload {
+  const patchCount = 196;
+  if (!Number.isInteger(componentCount) || componentCount < 1 ||
+      componentCount > SOURCE_PCA_MAX_COMPONENTS ||
+      coefficients.length !== patchCount * componentCount) {
+    throw new Error(`Expected 196xN source-PCA coefficients, got ${coefficients.length}`);
+  }
+  const scales = new Float32Array(patchCount);
+  const values = new Int8Array(coefficients.length);
+  for (let index = 0; index < coefficients.length; index++) {
+    if (!Number.isFinite(coefficients[index]!)) {
+      throw new Error(`Source PCA coefficients contain a non-finite value at index ${index}`);
+    }
+  }
+  for (let row = 0; row < patchCount; row++) {
+    const offset = row * componentCount;
+    let maxAbs = 0;
+    for (let dim = 0; dim < componentCount; dim++) {
+      maxAbs = Math.max(maxAbs, Math.abs(coefficients[offset + dim]!));
+    }
+    scales[row] = maxAbs;
+    const multiplier = maxAbs > 0 ? 127 / maxAbs : 0;
+    for (let dim = 0; dim < componentCount; dim++) {
+      values[offset + dim] = Math.max(
+        -127,
+        Math.min(127, Math.round(coefficients[offset + dim]! * multiplier)),
+      );
+    }
+  }
+  const packed = new Uint8Array(scales.byteLength + values.byteLength);
+  packed.set(new Uint8Array(scales.buffer), 0);
+  packed.set(new Uint8Array(values.buffer), scales.byteLength);
+  const compressed = zlibSync(packed);
+  const data = uint8ToBase64(compressed);
+  console.info(
+    "[VDLM] source PCA wire bytes:",
+    data.length,
+    "base64 bytes; compressed bytes:",
+    compressed.byteLength,
+    "shape:",
+    `${patchCount}x${componentCount}`,
+  );
+  return {
+    encoding: "base64",
+    dtype: "int8_quantized",
+    shape: [patchCount, componentCount],
+    data,
+    compression: "zlib",
+    transform: SOURCE_PCA_VERSION,
+  };
+}
+
 export async function hashViewport(width: number, height: number, stateVersion: number): Promise<string> {
   const data = new TextEncoder().encode(`${width}x${height}@v${stateVersion}`);
   const digest = await crypto.subtle.digest("SHA-256", data);
@@ -254,6 +318,9 @@ export async function hashViewport(width: number, height: number, stateVersion: 
 export async function buildLatentFramePayloadWithAttestation(
   params: Parameters<typeof buildLatentFramePayload>[0] & { shaderVersion?: string },
 ): Promise<LatentFramePayload> {
+  if (!params.sanitizedMatrix) {
+    throw new Error("Attestation requires a full adapted sanitized matrix");
+  }
   const payload = buildLatentFramePayload(params);
   try {
     const attestation = await buildAttestation(

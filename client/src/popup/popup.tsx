@@ -10,7 +10,7 @@ const defaultStatus: AgentStatus = {
   stateVersion: 0,
   frameCount: 0,
   lastError: null,
-  visionMode: "mock",
+  visionMode: "onnx",
   processingMode: "auto",
   pipelineStage: "idle",
   tabId: null,
@@ -20,7 +20,12 @@ function Popup() {
   const [status, setStatus] = useState<AgentStatus>(defaultStatus);
   const [backendUrl, setBackendUrl] = useState("ws://127.0.0.1:8080/ws/v1/session");
   const [taskIntent, setTaskIntent] = useState("Click the Learn more link");
-  const [visionMode, setVisionMode] = useState<"mock" | "onnx">("mock");
+  const [visionMode, setVisionMode] = useState<"mock" | "onnx">("onnx");
+  const [onnxModelUrl, setOnnxModelUrl] = useState("/models/siglip-base-patch16-224-vision-fp16.onnx");
+  const [sanitizerMode, setSanitizerMode] = useState<"svd" | "rank1">("svd");
+  const [sanitizerK, setSanitizerK] = useState(4);
+  const [sanitizerAlpha, setSanitizerAlpha] = useState(0.01);
+  const [payloadMode, setPayloadMode] = useState<"standard" | "source-pca">("standard");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -34,17 +39,78 @@ function Popup() {
       setBackendUrl(cfg.backendWsUrl);
       setTaskIntent(cfg.taskIntent);
       setVisionMode(cfg.visionMode);
+      setOnnxModelUrl(cfg.onnxModelUrl);
+      setSanitizerMode(cfg.sanitizerMode);
+      setSanitizerK(cfg.sanitizerK);
+      setSanitizerAlpha(cfg.sanitizerAlpha);
+      setPayloadMode(cfg.payloadMode);
     });
     void refreshStatus();
     const id = setInterval(() => void refreshStatus(), 800);
     return () => clearInterval(id);
   }, [refreshStatus]);
 
+  useEffect(() => {
+    if (visionMode !== "onnx") {
+      setError(null);
+      return;
+    }
+    let active = true;
+    const modelUrls = [
+      onnxModelUrl,
+      onnxModelUrl.replace("vision-fp16.onnx", "vision-fp32.onnx"),
+      onnxModelUrl.replace(/vision-(fp16|fp32)\.onnx(?=[?#]|$)/, "adapter.onnx"),
+    ];
+    const requiredUrls = payloadMode === "source-pca"
+      ? [...modelUrls, "/pca/source-pca-v1.bin"]
+      : modelUrls;
+    void Promise.all(requiredUrls.map(async (url) => {
+      try {
+        return (await fetch(url, { method: "HEAD" })).ok;
+      } catch {
+        return false;
+      }
+    })).then((available) => {
+      if (!active) return;
+      if (available.slice(0, 3).some((exists) => !exists)) {
+        setError(
+          "SigLIP ONNX model files are missing. Export them with " +
+          "`python scripts/download-siglip-onnx.py --out-dir client/public/models`, then rebuild the extension.",
+        );
+      } else if (payloadMode === "source-pca" && !available[3]) {
+        setError("Source PCA basis is missing. Run backend/eval/siglip/fit_source_pca.py, then rebuild the extension.");
+      } else {
+        setError(null);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [visionMode, onnxModelUrl, payloadMode]);
+
   const startAgent = async () => {
     setError(null);
     setBusy(true);
     try {
-      await saveConfig({ backendWsUrl: backendUrl, taskIntent, visionMode });
+      if (visionMode === "onnx" && !onnxModelUrl.trim()) {
+        throw new Error("SigLIP ONNX model URL is missing. Build the local models or select Mock test mode.");
+      }
+      if (!Number.isInteger(sanitizerK) || sanitizerK < 1 || sanitizerK > 8) {
+        throw new Error("SVD rank must be an integer from 1 to 8.");
+      }
+      if (!Number.isFinite(sanitizerAlpha) || sanitizerAlpha < 0) {
+        throw new Error("Sanitizer alpha must be a non-negative number.");
+      }
+      await saveConfig({
+        backendWsUrl: backendUrl,
+        taskIntent,
+        visionMode,
+        onnxModelUrl,
+        sanitizerMode,
+        sanitizerK,
+        sanitizerAlpha,
+        payloadMode,
+      });
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) throw new Error("No active tab — click the webpage first");
       if (!tab.url?.startsWith("http")) {
@@ -94,8 +160,52 @@ function Popup() {
           value={visionMode}
           onChange={(e) => setVisionMode(e.target.value as "mock" | "onnx")}
         >
-          <option value="mock">Mock (WebGPU encoder)</option>
+          <option value="mock">Mock (test mode)</option>
           <option value="onnx">ONNX SigLIP</option>
+        </select>
+      </label>
+
+      {visionMode === "onnx" && (
+        <label style={styles.label}>
+          SigLIP ONNX model URL
+          <input style={styles.input} value={onnxModelUrl} onChange={(e) => setOnnxModelUrl(e.target.value)} />
+          <span style={styles.hint}>Missing local models will be reported when starting.</span>
+        </label>
+      )}
+
+      <label style={styles.label}>
+        Sanitizer
+        <select
+          style={styles.input}
+          value={sanitizerMode}
+          onChange={(e) => setSanitizerMode(e.target.value as "svd" | "rank1")}
+        >
+          <option value="svd">SVD null-space (default)</option>
+          <option value="rank1">Rank-1 baseline</option>
+        </select>
+      </label>
+
+      {sanitizerMode === "svd" && (
+        <label style={styles.label}>
+          SVD rank (1–8)
+          <input style={styles.input} type="number" min={1} max={8} step={1} value={sanitizerK} onChange={(e) => setSanitizerK(Number(e.target.value))} />
+        </label>
+      )}
+
+      <label style={styles.label}>
+        Sanitizer alpha
+        <input style={styles.input} type="number" min={0} step={0.001} value={sanitizerAlpha} onChange={(e) => setSanitizerAlpha(Number(e.target.value))} />
+      </label>
+
+      <label style={styles.label}>
+        Payload representation
+        <select
+          style={styles.input}
+          value={payloadMode}
+          onChange={(e) => setPayloadMode(e.target.value as "standard" | "source-pca")}
+        >
+          <option value="standard">Full adapted tensor</option>
+          <option value="source-pca">Source SigLIP with PCA (experimental)</option>
         </select>
       </label>
 
@@ -113,7 +223,7 @@ function Popup() {
       </div>
 
       {(error || status.lastError) && (
-        <p style={styles.error}>Error: {error ?? status.lastError}</p>
+        <p role="alert" style={styles.error}>Error: {error ?? status.lastError}</p>
       )}
 
       <section style={styles.status}>

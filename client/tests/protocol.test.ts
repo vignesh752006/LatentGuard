@@ -16,7 +16,7 @@ describe("protocol messages", () => {
     });
     const parsed = JSON.parse(raw);
     expect(parsed.type).toBe("session.init");
-    expect(parsed.protocol_version).toBe("1.0");
+    expect(parsed.protocol_version).toBe("1.1");
   });
 
   it("parses action.directive", () => {

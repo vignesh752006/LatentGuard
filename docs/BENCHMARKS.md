@@ -111,7 +111,6 @@ These are verified by CI tests:
 **What is NOT yet measured:**
 - Real end-to-end latency (requires a Chrome extension session with backend).
 - Utility accuracy (requires running tasks on demo pages with the full pipeline).
-- ONNX encode latency (no real SigLIP ONNX model in CI — download script provided).
+- ONNX encode latency is measured in the SigLIP evaluation run; CI parity tests fail if the required local ONNX models are missing.
 
 These will be filled in when a full benchmark run is performed and results verified.
-

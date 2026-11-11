@@ -175,6 +175,7 @@ function rowMse(a: Float32Array, b: Float32Array, offset: number, dim: number): 
 export interface SanitizerResult {
   sanitized: Float32Array;
   metrics: SanitizationMetrics;
+  privateBasis: Float32Array;
 }
 
 export interface MultiRankSanitizerOptions {
@@ -184,6 +185,9 @@ export interface MultiRankSanitizerOptions {
   alpha?: number;
   /** If true, compute and return diagnostic metrics. Default: true. */
   computeMetrics?: boolean;
+  /** Tensor shape override for compact SigLIP source-grid sanitization. */
+  patchCount?: number;
+  embeddingDim?: number;
 }
 
 /**
@@ -199,11 +203,23 @@ export function sanitizeSVD(
   sensitivePatchIndices: number[],
   opts: MultiRankSanitizerOptions = {},
 ): SanitizerResult {
-  const { patchCount, embeddingDim } = TENSOR_CONTRACT;
-  const k = Math.max(1, Math.min(8, opts.k ?? 1));
+  const patchCount = opts.patchCount ?? TENSOR_CONTRACT.patchCount;
+  const embeddingDim = opts.embeddingDim ?? TENSOR_CONTRACT.embeddingDim;
+  const requestedK = opts.k ?? 1;
+  const k = Math.max(1, Math.min(8, requestedK));
   const alpha = opts.alpha ?? 0.01;
   const computeMetrics = opts.computeMetrics ?? true;
 
+  if (!Number.isInteger(requestedK) || requestedK < 1 || requestedK > 8) {
+    throw new Error("SVD rank must be an integer from 1 to 8");
+  }
+  if (!Number.isFinite(alpha) || alpha < 0) {
+    throw new Error("Sanitizer alpha must be a finite non-negative number");
+  }
+  if (!Number.isInteger(patchCount) || patchCount < 1 ||
+      !Number.isInteger(embeddingDim) || embeddingDim < 1) {
+    throw new Error("Tensor dimensions must be positive integers");
+  }
   if (embeddings.length !== patchCount * embeddingDim) {
     throw new Error(
       `Tensor size mismatch: expected ${patchCount * embeddingDim}, got ${embeddings.length}`,
@@ -226,7 +242,7 @@ export function sanitizeSVD(
       cos_sim_sens: 1, cos_sim_non_sens: 1,
       k_used: 0, n_sens: 0,
     };
-    return { sanitized: V.slice(), metrics };
+    return { sanitized: V.slice(), metrics, privateBasis: new Float32Array(0) };
   }
 
   // Build W_sens: rows of V at sensitive indices [|I_sens|, D]
@@ -311,7 +327,7 @@ export function sanitizeSVD(
     };
   }
 
-  return { sanitized: Vprime, metrics };
+  return { sanitized: Vprime, metrics, privateBasis: W_priv };
 }
 
 /**
@@ -322,6 +338,12 @@ export function sanitizeRankOne(
   embeddings: Float32Array,
   sensitivePatchIndices: number[],
   alpha = 0.01,
+  shape?: { patchCount: number; embeddingDim: number },
 ): Float32Array {
-  return sanitizeSVD(embeddings, sensitivePatchIndices, { k: 1, alpha, computeMetrics: false }).sanitized;
+  return sanitizeSVD(embeddings, sensitivePatchIndices, {
+    k: 1,
+    alpha,
+    computeMetrics: false,
+    ...shape,
+  }).sanitized;
 }

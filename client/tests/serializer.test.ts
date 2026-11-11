@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { unzlibSync } from "fflate";
 
 import { TENSOR_CONTRACT } from "../src/protocol/messages";
 import {
@@ -6,6 +7,7 @@ import {
   buildLatentFramePayload,
   decodeBase64ToUint8,
   encodeCompactTensorPayload,
+  encodeSourcePcaTensorPayload,
   encodeTensorPayload,
 } from "../src/protocol/serializer";
 
@@ -121,6 +123,27 @@ describe("tensor serialization", () => {
   it("compact payload rejects wrong tensor size", () => {
     const wrongMatrix = new Float32Array(100);
     expect(() => encodeCompactTensorPayload(wrongMatrix)).toThrow(/Tensor size mismatch/);
+  });
+
+  it("encodes source PCA coefficients as a compact 196xN zlib payload", () => {
+    const components = 64;
+    const coefficients = new Float32Array(196 * components);
+    for (let i = 0; i < coefficients.length; i++) coefficients[i] = Math.sin(i * 0.03);
+    const payload = encodeSourcePcaTensorPayload(coefficients, components);
+    const raw = unzlibSync(decodeBase64ToUint8(payload.data));
+
+    expect(payload.transform).toBe("source_pca_v1");
+    expect(payload.shape).toEqual([196, components]);
+    expect(payload.dtype).toBe("int8_quantized");
+    expect(raw.byteLength).toBe(196 * 4 + 196 * components);
+  });
+
+  it("rejects non-finite source PCA coefficients", () => {
+    const coefficients = new Float32Array(196 * 64);
+    coefficients[123] = Number.NaN;
+    expect(() => encodeSourcePcaTensorPayload(coefficients, 64)).toThrow(
+      /non-finite value at index 123/,
+    );
   });
 
   // Cross-language fp16 round-trip is tested in serializer-backend-roundtrip.test.ts.
