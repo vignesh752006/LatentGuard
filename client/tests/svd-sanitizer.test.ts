@@ -5,7 +5,7 @@
  *   - V' @ W_priv ≈ 0 (privacy basis removed)
  *   - Shape preserved [576, 1152]
  *   - Identical output for fixed seed (determinism)
- *   - Edge cases: |I_sens|=0, |I_sens|<k, NaNs in input
+ *   - Edge cases: |I_sens|=0, |I_sens|<k, non-finite inputs
  *   - MSE/cos-sim logging
  */
 
@@ -125,13 +125,12 @@ describe('Task 4: SVD sanitizer — edge cases', () => {
     expect(sanitized.length).toBe(patchCount * embeddingDim);
   });
 
-  it('NaN in input: replaced with 0 before projection', () => {
-    const V = makeEmbeddings();
-    V[0] = NaN;
-    V[1152] = NaN;
-    expect(() => sanitizeSVD(V, [0, 1], { k: 1 })).not.toThrow();
-    const { sanitized } = sanitizeSVD(V, [0, 1], { k: 1 });
-    expect(Number.isFinite(sanitized[0])).toBe(true);
+  it('NaN and infinities in input throw before projection', () => {
+    for (const invalid of [NaN, Infinity, -Infinity]) {
+      const V = makeEmbeddings();
+      V[0] = invalid;
+      expect(() => sanitizeSVD(V, [0, 1], { k: 1 })).toThrow(/non-finite value/);
+    }
   });
 
   it('invalid patch indices are filtered out', () => {

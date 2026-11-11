@@ -6,6 +6,7 @@ import {
   type ScoreGrid,
   type TensorPayload,
 } from "./messages";
+import { ATTESTATION_SCHEME, buildAttestation } from "./attestation";
 
 const FORBIDDEN_KEYS =
   /screenshot|raw_pixels?|image_data|dom_html|password|credential|payment/i;
@@ -95,6 +96,8 @@ export function buildLatentFramePayload(params: {
   compress?: boolean;
   /** Optional Task 6: per-patch text-image similarity scores (Float32Array of length 576). */
   scoreGrid?: Float32Array | null;
+  /** Task 10: shader/model version string for attestation. Defaults to "0.1.0". */
+  shaderVersion?: string;
 }): LatentFramePayload {
   let scoreGridField: ScoreGrid | undefined;
   if (params.scoreGrid && params.scoreGrid.length === TENSOR_CONTRACT.patchCount) {
@@ -126,6 +129,7 @@ export function buildLatentFramePayload(params: {
       vdlm_shader_version: "0.1.0",
       sanitization_method: "null_space_projection",
       attestation: null,
+      attestation_scheme: ATTESTATION_SCHEME,
     },
     ...(scoreGridField ? { score_grid: scoreGridField } : {}),
   };
@@ -232,6 +236,29 @@ export async function hashViewport(width: number, height: number, stateVersion: 
   const digest = await crypto.subtle.digest("SHA-256", data);
   const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
   return `sha256:${hex.slice(0, 16)}`;
+}
+
+/**
+ * Task 10: Async variant of buildLatentFramePayload that generates and embeds
+ * a signed ECDSA attestation in the provenance field.
+ *
+ * NOTE: This is an INTEGRITY CHECK, not a ZKP. Labelled clearly in the payload.
+ */
+export async function buildLatentFramePayloadWithAttestation(
+  params: Parameters<typeof buildLatentFramePayload>[0] & { shaderVersion?: string },
+): Promise<LatentFramePayload> {
+  const payload = buildLatentFramePayload(params);
+  try {
+    const attestation = await buildAttestation(
+      params.shaderVersion ?? payload.provenance.vdlm_shader_version ?? "0.1.0",
+      params.sanitizedMatrix,
+    );
+    payload.provenance.attestation = attestation;
+  } catch {
+    // Non-fatal: attestation failure should not block the frame send.
+    payload.provenance.attestation = null;
+  }
+  return payload;
 }
 
 function uint8ToBase64(bytes: Uint8Array): string {

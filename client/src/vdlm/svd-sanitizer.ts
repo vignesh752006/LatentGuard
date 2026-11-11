@@ -13,7 +13,7 @@
  * Edge cases:
  *   - |I_sens| = 0: return V unchanged (identity)
  *   - |I_sens| < k: use k' = |I_sens| singular vectors
- *   - NaN in V: replace with 0 before projection
+ *   - NaN / infinite values: throw before projection
  *
  * See docs/ASSUMPTIONS.md for measured MSE / cosine-similarity results.
  */
@@ -49,7 +49,7 @@ function topKRightSingularVectors(A: Float32Array, m: number, n: number, k: numb
       // v_new = A^T u  [n]
       const vNew = matvecMulT(Acopy, m, n, u);
       normalizeInPlace(vNew, n);
-      v = vNew;
+      v.set(vNew);
     }
 
     // Store this singular vector
@@ -204,15 +204,20 @@ export function sanitizeSVD(
   const alpha = opts.alpha ?? 0.01;
   const computeMetrics = opts.computeMetrics ?? true;
 
-  // Validate / sanitize inputs
-  const nSens = sensitivePatchIndices.length;
-  const validIndices = sensitivePatchIndices.filter(i => i >= 0 && i < patchCount);
-
-  // Fix NaNs in input
-  const V = new Float32Array(embeddings.length);
-  for (let i = 0; i < embeddings.length; i++) {
-    V[i] = Number.isFinite(embeddings[i]!) ? embeddings[i]! : 0;
+  if (embeddings.length !== patchCount * embeddingDim) {
+    throw new Error(
+      `Tensor size mismatch: expected ${patchCount * embeddingDim}, got ${embeddings.length}`,
+    );
   }
+
+  for (let i = 0; i < embeddings.length; i++) {
+    if (!Number.isFinite(embeddings[i]!)) {
+      throw new Error(`Embedding contains a non-finite value at index ${i}`);
+    }
+  }
+
+  const validIndices = sensitivePatchIndices.filter(i => i >= 0 && i < patchCount);
+  const V = embeddings.slice();
 
   // Edge case: no sensitive patches → identity transform
   if (validIndices.length === 0) {
@@ -320,4 +325,3 @@ export function sanitizeRankOne(
 ): Float32Array {
   return sanitizeSVD(embeddings, sensitivePatchIndices, { k: 1, alpha, computeMetrics: false }).sanitized;
 }
-

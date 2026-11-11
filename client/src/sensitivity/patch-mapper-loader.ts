@@ -24,6 +24,22 @@ export interface PatchMapper {
   isWasm: boolean;
 }
 
+interface WasmPatchMapperModule {
+  default?: () => Promise<unknown>;
+  map_regions_to_patch_indices: (
+    viewportWidth: number,
+    viewportHeight: number,
+    gridRows: number,
+    gridCols: number,
+    regions: Float32Array,
+  ) => Uint32Array;
+  patch_index_to_normalized_coords: (
+    patchIndex: number,
+    gridRows: number,
+    gridCols: number,
+  ) => Float32Array;
+}
+
 /** Lazy singleton. */
 let _mapper: PatchMapper | null = null;
 
@@ -47,11 +63,8 @@ async function _tryLoadWasm(): Promise<PatchMapper> {
     // Dynamic import — bundler resolves this at build time.
     // The wasm-bindgen glue exports `map_regions_to_patch_indices` and
     // `patch_index_to_normalized_coords`.
-    const wasmModule = await import(
-      /* webpackIgnore: true */
-      /* @vite-ignore */
-      "/wasm/layout_parser.js"
-    );
+    const wasmUrl: string = "/wasm/layout_parser.js";
+    const wasmModule = (await import(/* @vite-ignore */ wasmUrl)) as WasmPatchMapperModule;
     // Trigger WASM init if the module exposes a default init function.
     if (typeof wasmModule.default === "function") {
       await wasmModule.default();
@@ -67,7 +80,7 @@ async function _tryLoadWasm(): Promise<PatchMapper> {
   }
 }
 
-function _makeWasmMapper(wasmModule: Record<string, Function>): PatchMapper {
+function _makeWasmMapper(wasmModule: WasmPatchMapperModule): PatchMapper {
   const { gridRows, gridCols } = TENSOR_CONTRACT;
   return {
     isWasm: true,
@@ -79,7 +92,7 @@ function _makeWasmMapper(wasmModule: Record<string, Function>): PatchMapper {
         flat[i * 4 + 2] = r.width;
         flat[i * 4 + 3] = r.height;
       });
-      const result: Uint32Array = wasmModule["map_regions_to_patch_indices"](
+      const result = wasmModule.map_regions_to_patch_indices(
         vw,
         vh,
         gridRows,
@@ -89,7 +102,7 @@ function _makeWasmMapper(wasmModule: Record<string, Function>): PatchMapper {
       return Array.from(result);
     },
     patchToNormalizedCoords(idx) {
-      const coords: Float32Array = wasmModule["patch_index_to_normalized_coords"](
+      const coords = wasmModule.patch_index_to_normalized_coords(
         idx,
         gridRows,
         gridCols,
@@ -106,4 +119,3 @@ function _makeTsMapper(): PatchMapper {
     patchToNormalizedCoords: patchToNormalizedCoordsTs,
   };
 }
-

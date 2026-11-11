@@ -53,26 +53,27 @@ These are synthetic inputs, not captured SigLIP embeddings.
 | fp16, uncompressed | 1,327,104 | Raw tensor size |
 | fp16 + zlib, repeating test pattern | 3,259 | Highly compressible synthetic input |
 | fp16 + zlib, cross-language test pattern | 2,613 | Backend decoded it with max absolute error 0.00039065 |
-| int8 per-row + zlib, seeded input | 665,610 | 50.2% of uncompressed fp16 |
-| int8 per-row + zlib, seeded input retaining top 10% per row | 123,425 | 9.3% of uncompressed fp16; above the 45 KB target |
+| int8 per-row + zlib, seeded random input | 665,610 | 50.2% of uncompressed fp16; target NOT met |
+| int8 per-row + zlib, seeded random input retaining top 10% per row | 123,425 | 9.3% of uncompressed fp16; target NOT met |
 
 ### Lower-dimensional projection experiment
 
-The seeded 576×1152 test matrix was projected with a fixed Gaussian matrix
+The seeded random 576×1152 test matrix was projected with a fixed Gaussian matrix
 generated from NumPy seed `0xdeadbeef`, normalized by `sqrt(d)`, then quantized
 per row to int8 and zlib-compressed. Pairwise cosine fidelity compares all
 165,600 off-diagonal patch pairs after quantization.
 
-| Projected dimension | Wire bytes | Mean absolute pairwise-cosine error | Pairwise-cosine correlation |
-|---:|---:|---:|---:|
-| 256 | 140,786 | 0.049684 | 0.427566 |
-| 128 | 72,312 | 0.070870 | 0.316395 |
-| 64 | 37,637 | 0.100167 | 0.223048 |
+| Projected dimension | Wire bytes | Mean absolute pairwise-cosine error | Pairwise-cosine correlation | 45 KB target |
+|---:|---:|---:|---:|---|
+| 256 | 140,786 | 0.049684 | 0.427566 | NOT met |
+| 128 | 72,312 | 0.070870 | 0.316395 | NOT met |
+| 64 | 37,637 | 0.100167 | 0.223048 | Met on this seeded input |
 
-The 64-dimensional experiment reaches <45 KB on this synthetic input, but its
+The 64-dimensional seeded-random experiment reaches <45 KB, but its
 measured pairwise-cosine correlation is only 0.223048. It is not enabled in the
-wire protocol. No projection has been evaluated on real SigLIP output, so no
-claim is made about its size or utility for actual frames.
+wire protocol. All size and projection results above were measured on synthetic
+seeded random data, not real embeddings. Re-measure after Task 3 with actual
+SigLIP output before making a claim about payload size or utility for real frames.
 
 The client logs serialized wire bytes per frame, and the backend logs received
 and decompressed byte counts. The protocol currently requires 576×1152 tensors.
