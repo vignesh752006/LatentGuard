@@ -320,3 +320,4 @@ export function sanitizeRankOne(
 ): Float32Array {
   return sanitizeSVD(embeddings, sensitivePatchIndices, { k: 1, alpha, computeMetrics: false }).sanitized;
 }
+
