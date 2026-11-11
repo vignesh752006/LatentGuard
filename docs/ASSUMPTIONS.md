@@ -77,3 +77,19 @@ SigLIP output before making a claim about payload size or utility for real frame
 
 The client logs serialized wire bytes per frame, and the backend logs received
 and decompressed byte counts. The protocol currently requires 576×1152 tensors.
+
+## Task 2 — Visible demo-page scan (2026-11-11)
+
+Measured by the Playwright test with a 1280×720 viewport and the production
+`scanSensitiveRegions()` and `mapRegionsToPatchesTs()` implementations:
+
+| Page | Scanner regions | `I_sens` patch count | Result |
+|---|---:|---:|---|
+| Login | 3 | 40 | Exact patch-set assertion passed for the visible password and marked canvas |
+| Checkout | 6 | 64 | Exact patch-set assertion passed for card number, CVV, name, and marked canvas |
+| No-sensitive-fields page | 0 | 0 | Empty `I_sens` assertion passed |
+
+The scanner reports the marked canvas under both its `data-vdlm-sensitive`
+custom selector and its accessible sensitive-role detection; those regions map
+to the same patches. These counts describe only the deterministic demo pages
+and tested viewport, not general-world detection accuracy or privacy.

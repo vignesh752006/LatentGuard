@@ -36,7 +36,13 @@ Load unpacked extension from `vdlm/client/dist/` in `chrome://extensions`.
 ```bash
 npm run dev          # Vite dev server + HMR for popup
 npm test             # Unit tests (serializer, protocol, patch mapping, state)
+npx playwright install chromium
+npm run test:e2e     # Visible 1280×720 demo-page scan and patch-mapping tests
 ```
+
+The Playwright tests open the pages in `demo-pages/` in a real browser viewport,
+inject the existing DOM scanner, and compare its `I_sens` indices against the
+patch mapper output for the visible sensitive fields.
 
 Start backend:
 
