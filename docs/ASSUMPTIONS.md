@@ -44,21 +44,35 @@ Client does **not** verify cryptographic provenance (`provenance.attestation` is
 
 ## Task 1 — Measured Wire Sizes (2026-11-11)
 
-**Bug fixed (Task 1)**: `gzipSync` was used in `serializer.ts` but labelled `"zlib"`.
-Backend now detects gzip magic bytes and falls back gracefully; client switched to `zlibSync`.
+Measurements are from the client Vitest tests with 576×1152 tensors. The seeded
+size tests use an LCG seeded with `0xdeadbeef`, producing values in [-1, 1].
+These are synthetic inputs, not captured SigLIP embeddings.
 
-| Encoding | Measured bytes | Ratio vs. fp16 uncompressed |
-|----------|---------------|------------------------------|
-| fp16 uncompressed | 1,327,104 | 1.00 (baseline ~1.27 MB) |
-| fp16 + zlib (structured repeating data) | ~1,300–3,300 | <0.3% |
-| int8 quantized + zlib (SigLIP-like random) | ~12,000–22,000 | ~1–2% (artificial; real ≈60–120 KB) |
-| int8 quantized + zlib + top-10% sparsity (random) | ~120,000 | ~9% (real ≈30–60 KB) |
+| Encoding / input | Measured bytes | Notes |
+|---|---:|---|
+| fp16, uncompressed | 1,327,104 | Raw tensor size |
+| fp16 + zlib, repeating test pattern | 3,259 | Highly compressible synthetic input |
+| fp16 + zlib, cross-language test pattern | 2,613 | Backend decoded it with max absolute error 0.00039065 |
+| int8 per-row + zlib, seeded input | 665,610 | 50.2% of uncompressed fp16 |
+| int8 per-row + zlib, seeded input retaining top 10% per row | 123,425 | 9.3% of uncompressed fp16; above the 45 KB target |
 
-**Conclusion on `<45 KB` target**: The blueprint target is achievable with int8 quantization +
-zlib for structured SigLIP embeddings (high spatial correlation). With random / adversarial data,
-int8+zlib alone achieves ~60–120 KB. For guaranteed `<45 KB` on adversarial inputs, a
-learned/PCA projection to lower dimension (e.g. 576×256 or 196×256) is needed.
+### Lower-dimensional projection experiment
 
-Wire sizes are logged per frame:
-- Client: `console.info("[VDLM] wire bytes: ...")` / `"[VDLM] compact wire bytes: ..."`
-- Backend: `structlog.info("tensor_decoded", wire_bytes=..., decompressed_bytes=...)`
+The seeded 576×1152 test matrix was projected with a fixed Gaussian matrix
+generated from NumPy seed `0xdeadbeef`, normalized by `sqrt(d)`, then quantized
+per row to int8 and zlib-compressed. Pairwise cosine fidelity compares all
+165,600 off-diagonal patch pairs after quantization.
+
+| Projected dimension | Wire bytes | Mean absolute pairwise-cosine error | Pairwise-cosine correlation |
+|---:|---:|---:|---:|
+| 256 | 140,786 | 0.049684 | 0.427566 |
+| 128 | 72,312 | 0.070870 | 0.316395 |
+| 64 | 37,637 | 0.100167 | 0.223048 |
+
+The 64-dimensional experiment reaches <45 KB on this synthetic input, but its
+measured pairwise-cosine correlation is only 0.223048. It is not enabled in the
+wire protocol. No projection has been evaluated on real SigLIP output, so no
+claim is made about its size or utility for actual frames.
+
+The client logs serialized wire bytes per frame, and the backend logs received
+and decompressed byte counts. The protocol currently requires 576×1152 tensors.

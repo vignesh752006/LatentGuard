@@ -9,6 +9,16 @@ import {
   encodeTensorPayload,
 } from "../src/protocol/serializer";
 
+function makeSeededMatrix(size: number): Float32Array {
+  const matrix = new Float32Array(size);
+  let state = 0xdeadbeef;
+  for (let i = 0; i < size; i++) {
+    state = (Math.imul(1664525, state) + 1013904223) >>> 0;
+    matrix[i] = (state / 0x100000000) * 2 - 1;
+  }
+  return matrix;
+}
+
 describe("tensor serialization", () => {
   it("encodes float32 matrix to fp16 base64", () => {
     const size = TENSOR_CONTRACT.patchCount * TENSOR_CONTRACT.embeddingDim;
@@ -83,31 +93,29 @@ describe("tensor serialization", () => {
 
   it("compact payload wire size is smaller than fp16 uncompressed (1,327,104 bytes)", () => {
     const size = TENSOR_CONTRACT.patchCount * TENSOR_CONTRACT.embeddingDim;
-    const matrix = new Float32Array(size);
-    // Random-ish data via deterministic pattern
-    for (let i = 0; i < size; i++) matrix[i] = Math.sin(i) * 2 - 1;
+    const matrix = makeSeededMatrix(size);
 
     const payload = encodeCompactTensorPayload(matrix);
     const wireBytes = decodeBase64ToUint8(payload.data).byteLength;
 
     // Must be smaller than uncompressed fp16
     expect(wireBytes).toBeLessThan(1_327_104);
-    console.info(`[Task 1] compact wire bytes: ${wireBytes.toLocaleString()} ` +
+    console.info(`[Task 1] seeded int8+zlib wire bytes: ${wireBytes.toLocaleString()} ` +
       `(${(wireBytes / 1_327_104 * 100).toFixed(1)}% of fp16)`);
   });
 
   it("compact payload with topKPercent sparsity is smaller than without", () => {
     const size = TENSOR_CONTRACT.patchCount * TENSOR_CONTRACT.embeddingDim;
-    const matrix = new Float32Array(size);
-    for (let i = 0; i < size; i++) matrix[i] = Math.random() * 2 - 1;
+    const matrix = makeSeededMatrix(size);
 
     const densePayload = encodeCompactTensorPayload(matrix, { topKPercent: 0 });
     const sparsePayload = encodeCompactTensorPayload(matrix, { topKPercent: 0.1 });
 
-    const denseByes = decodeBase64ToUint8(densePayload.data).byteLength;
+    const denseBytes = decodeBase64ToUint8(densePayload.data).byteLength;
     const sparseBytes = decodeBase64ToUint8(sparsePayload.data).byteLength;
     // With 90% zeros, compression should do much better
-    expect(sparseBytes).toBeLessThan(denseByes);
+    expect(sparseBytes).toBeLessThan(denseBytes);
+    console.info(`[Task 1] seeded top-10% int8+zlib wire bytes: ${sparseBytes.toLocaleString()}`);
   });
 
   it("compact payload rejects wrong tensor size", () => {
@@ -115,6 +123,5 @@ describe("tensor serialization", () => {
     expect(() => encodeCompactTensorPayload(wrongMatrix)).toThrow(/Tensor size mismatch/);
   });
 
-  // Note: round-trip fidelity (client -> backend decode) is tested in
-  // backend/tests/unit/test_tensor.py::test_int8_quantized_fidelity
+  // Cross-language fp16 round-trip is tested in serializer-backend-roundtrip.test.ts.
 });
