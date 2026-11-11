@@ -22,7 +22,7 @@ your browser (chrome extension)              your laptop (python backend)
 
 **real today:** chrome extension architecture, tab capture, dom sensitivity scan, websocket protocol, tensor shape validation, stale-state checks, action execution in the browser.
 
-**mocked today:** vision encoder (procedural webgpu, not real siglip), backend planner (keyword rules, not real llm), simplified vdlm math, no cryptographic privacy proof.
+**mocked today:** vision defaults to the procedural mock unless `visionMode` is `onnx`; the real ONNX path uses SigLIP with an FP16 WebGPU model and an FP32 WASM fallback. The planner uses keyword rules, VDLM math is simplified, and there is no cryptographic privacy proof.
 
 ---
 
@@ -262,12 +262,12 @@ smart-privacy-agent/
 
 | part | what the demo actually does |
 |------|----------------------------|
-| **vision encoder** | procedural webgpu shader generates patch embeddings from pixel statistics — **not** real siglip-base onnx inference |
-| **onnx / siglip mode** | optional in popup dropdown; without a downloaded model it falls back to mock and logs an error |
+| **vision encoder** | Procedural mock is the default; configured `onnx` mode runs the SigLIP vision tower |
+| **onnx / siglip mode** | Requires local FP16, FP32 fallback, and adapter models; ONNX mode does not silently fall back to the mock |
 | **vdlm sanitization** | simplified rank-1 style gpu projection — **not** full svd null-space from the research paper |
 | **backend planner** | `VDLM_MODEL_PROVIDER=mock` — keyword rules (`scroll` → scroll, `click` → click at dominant patch). **not** llama-3-70b reasoning |
 | **llama provider** | code stub exists (`llama_planner.py`) but needs a separate openai-compatible api server + api key |
-| **payload size** | sends full ~1.3 mb tensor json — **not** the blueprint `<45 kb` target |
+| **payload size** | Default sends the full ~1.3 MB fp16 tensor; measured compact real embeddings and lower-dimensional projections still do **not** meet the `<45 KB` Base64-wire target without severe fidelity loss |
 | **privacy guarantees** | no zero-knowledge proof, no cryptographic attestation, no adversarial inversion testing |
 | **wasm patch mapper** | rust source is in repo but wasm binary is **not** prebuilt — demo uses typescript fallback unless you run `npm run build:wasm` with rust installed |
 
@@ -277,19 +277,40 @@ smart-privacy-agent/
 
 these are the main gaps between this prototype and the full research blueprint:
 
-1. replace mock webgpu encoder with **real siglip-base fp16 onnx** (onnx runtime web + webgpu)
-2. replace keyword mock planner with **visual grounding** or llama/vlm that uses page information
-3. stronger **null-space sanitization** (multi-basis / svd, not rank-1 mean)
-4. ship prebuilt **rust wasm** patch mapper in the default path
-5. **compress payloads** toward 45 kb and measure on the wire
-6. controlled demo page with buttons + sensitive fields (not just example.com)
-7. **feature inversion evaluation** harness
-8. latency benchmarks (350 ms target)
-9. cryptographic provenance / attestation (research hardening)
+1. replace keyword mock planner with **visual grounding** or llama/vlm that uses page information
+2. stronger **null-space sanitization** (multi-basis / svd, not rank-1 mean)
+3. ship prebuilt **rust wasm** patch mapper in the default path
+4. reduce payloads toward 45 KB without the measured fidelity loss
+5. **feature inversion evaluation** harness
+6. improve latency toward the 350 ms target
+7. cryptographic provenance / attestation (research hardening)
 
 ---
 
 ## configuration (usually you can ignore this)
+
+### Optional real SigLIP ONNX encoder
+
+The extension's mock encoder remains the default. To enable the real encoder,
+install the Python export dependencies and export all three local ONNX models:
+
+```powershell
+python -m pip install -e "backend[siglip-eval]"
+python scripts/download-siglip-onnx.py --out-dir client/public/models
+```
+
+For the PowerShell wrapper use `scripts/download-siglip-onnx.ps1`; on
+POSIX-compatible systems use `scripts/download-siglip-onnx.sh`. The wrappers
+export the public `google/siglip-base-patch16-224` checkpoint. Configure
+`visionMode` as `onnx` and `onnxModelUrl` as the served FP16 vision model URL in
+extension settings. ONNX mode tries the FP16 graph with WebGPU, then uses the
+FP32 graph on WASM; either path reports a clear initialization error if its
+required model or the adapter is missing or invalid. It never substitutes mock
+embeddings. Local model files are ignored by git and are copied into `client/dist`
+by Vite when present. See
+[backend/eval/siglip/README.md](backend/eval/siglip/README.md) for reference
+fixtures, exact preprocessing, measured payload sizes, export details, and
+parity/latency tests.
 
 backend `.env`:
 
@@ -354,7 +375,7 @@ terminal 1 must be running. check port 8080 is not used by another app.
 5. point at popup: `connected: yes`, frames counting up
 6. point at backend logs: `latent_frame_received`, `action_planned`
 7. page scrolls (or click task if scroll is hard to see)
-8. say clearly: *"architecture is real — capture and sanitization stay in the browser, only latent tensors cross the wire. vision and planning are simplified mocks for this prototype; production would use siglip + a real reasoning model."*
+8. say clearly: *"the default demo uses a procedural mock vision encoder and mock planner; the optional ONNX mode runs SigLIP locally. Neither path establishes a privacy guarantee, and planning remains a keyword-based prototype."*
 9. click **stop**
 
 ---

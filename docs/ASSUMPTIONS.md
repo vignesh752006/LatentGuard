@@ -42,41 +42,91 @@ Client does **not** verify cryptographic provenance (`provenance.attestation` is
 
 ---
 
-## Task 1 — Measured Wire Sizes (2026-11-11)
+## Task 3 — Real SigLIP Payload Sizes and Fidelity (2026-11-12)
 
-Measurements are from the client Vitest tests with 576×1152 tensors. The seeded
-size tests use an LCG seeded with `0xdeadbeef`, producing values in [-1, 1].
-These are synthetic inputs, not captured SigLIP embeddings.
+Measurements use the five checked-in reference images (two 1280×720 demo
+screenshots and three NASA images), with their real `[196,768]` SigLIP outputs
+adapted to `[576,1152]` by bilinear 14×14→24×24 upsampling and the shared seeded
+768→1152 projection. The Python adapted arrays matched the exported ONNX
+adapter within max absolute error `1.96e-5`. Size results below are zlib
+compressed binary bytes before Base64 and JSON framing; see the Base64 note for
+the actual transport threshold.
 
-| Encoding / input | Measured bytes | Notes |
-|---|---:|---|
-| fp16, uncompressed | 1,327,104 | Raw tensor size |
-| fp16 + zlib, repeating test pattern | 3,259 | Highly compressible synthetic input |
-| fp16 + zlib, cross-language test pattern | 2,613 | Backend decoded it with max absolute error 0.00039065 |
-| int8 per-row + zlib, seeded random input | 665,610 | 50.2% of uncompressed fp16; target NOT met |
-| int8 per-row + zlib, seeded random input retaining top 10% per row | 123,425 | 9.3% of uncompressed fp16; target NOT met |
+| Encoding / transform | Mean bytes (min–max across 5 images) | Mean per-patch cosine vs. full adapted V | 45 KB result |
+|---|---:|---:|---|
+| fp16 + zlib | 1,225,180 (1,224,710–1,225,554) | Not measured | target NOT met |
+| Per-row int8 + zlib | 611,811 (609,167–614,207) | 0.999970 (minimum patch 0.999940) | target NOT met |
+| Per-row int8, top 10% + zlib | 139,001 (138,608–139,448) | 0.659033 (minimum patch 0.630010) | target NOT met |
+| Orthogonal random projection to 256 dims, int8 + zlib | 140,193 (139,237–140,729) | 0.474137 (minimum patch 0.415922) | target NOT met |
+| Orthogonal random projection to 128 dims, int8 + zlib | 71,765 (71,053–72,154) | 0.339956 (minimum patch 0.291390) | target NOT met |
+| Orthogonal random projection to 64 dims, int8 + zlib | 37,469 (36,947–37,866) | 0.241391 (minimum patch 0.180520) | target NOT met on Base64 wire |
 
-### Lower-dimensional projection experiment
+The 64-dimensional compressed binary body averages 37,469 bytes, but Base64
+expands it to an average 49,959 bytes before JSON metadata. Thus the
+blueprint's `<45 KB` target is **not met on the current Base64 WebSocket wire**.
+Even ignoring Base64, reaching the binary threshold requires the 64-dimensional
+projection, whose reconstructed per-patch cosine averages only 0.241391. The
+lower-dimensional transforms are exploratory and are not enabled in the
+576×1152 protocol. Top-10% sparsity is also lossy (mean cosine 0.659033).
 
-The seeded random 576×1152 test matrix was projected with a fixed Gaussian matrix
-generated from NumPy seed `0xdeadbeef`, normalized by `sqrt(d)`, then quantized
-per row to int8 and zlib-compressed. Pairwise cosine fidelity compares all
-165,600 off-diagonal patch pairs after quantization.
+The exact client `fflate` serializer measurements on these five browser-adapted
+embeddings were 1,227,820 compressed / 1,637,095 Base64 bytes for fp16,
+612,345 / 816,462 bytes for per-row int8, and 143,237 / 190,983 bytes for
+per-row int8 with top-10% sparsity. These measurements confirm that the current
+client wire payload also misses the target for each enabled full-dimension
+encoding.
 
-| Projected dimension | Wire bytes | Mean absolute pairwise-cosine error | Pairwise-cosine correlation | 45 KB target |
-|---:|---:|---:|---:|---|
-| 256 | 140,786 | 0.049684 | 0.427566 | NOT met |
-| 128 | 72,312 | 0.070870 | 0.316395 | NOT met |
-| 64 | 37,637 | 0.100167 | 0.223048 | Met on this seeded input |
+The random projection uses seed `0xdeadbeef`, a NumPy standard-normal
+`1152×256` matrix, reduced QR orthonormalization, and the first 64/128/256
+columns. Fidelity is the mean cosine for each original adapted patch row
+against its reconstruction through the transposed orthonormal basis. The
+per-image measurements and exact procedure are reproducible with
+`backend/eval/siglip/measure_payloads.py`.
 
-The 64-dimensional seeded-random experiment reaches <45 KB, but its
-measured pairwise-cosine correlation is only 0.223048. It is not enabled in the
-wire protocol. All size and projection results above were measured on synthetic
-seeded random data, not real embeddings. Re-measure after Task 3 with actual
-SigLIP output before making a claim about payload size or utility for real frames.
+### SigLIP ONNX parity and runtime
 
-The client logs serialized wire bytes per frame, and the backend logs received
-and decompressed byte counts. The protocol currently requires 576×1152 tensors.
+The reference uses `google/siglip-base-patch16-224`, RGB PIL bilinear resize to
+224×224, `/255`, `(x-0.5)/0.5`, and CHW. FP16 ONNX mean patch cosine on the five
+fixtures using ONNX Runtime 1.31.1 CPU is:
+
+| Image | Mean patch cosine |
+|---|---:|
+| Login demo | 0.999987 |
+| Checkout demo | 0.999988 |
+| NASA `iss073e0763824` | 0.999951 |
+| NASA `iss009e05944` | 0.999992 |
+| NASA `iss009e05953` | 0.999985 |
+
+The browser WASM FP32 fallback measured cosines `0.9999999997`, `0.9999989099`,
+`0.9999996683`, `0.9999990943`, and `0.9999974977` respectively, with output
+shape `[576,1152]`. The browser test also passed deterministic-output and
+missing-model error checks.
+
+| Model artifact | Measured size |
+|---|---:|
+| FP16 vision graph (WebGPU path) | 171,804,953 bytes |
+| FP32 vision graph (WASM fallback) | 343,344,204 bytes |
+| Fixed projection adapter | 3,539,707 bytes |
+
+On Windows, Playwright Chromium `158.0.8127.18`, 8 reported logical cores, and
+cross-origin isolation enabled:
+
+| Provider | Samples | p50 full encode | p95 full encode | Result |
+|---|---:|---:|---:|---|
+| WASM with FP32 model | 20 repeated login frames after warm-up | 981.550 ms | 1,054.125 ms | Measured |
+| WebGPU with FP16 model | 0 | — | — | No adapter available |
+
+Full encode includes preprocessing, vision inference, and the adapter. A
+separate diagnostic FP16-on-WASM vision inference took `236,686 ms` in a
+non-isolated browser run; this is not the 20-frame WASM benchmark. The extension
+manifest and the Vite test server enable cross-origin isolation for WASM
+threads. Model files are ignored by git; Vite copies locally exported models
+into the ignored `client/dist` directory when building the extension.
+
+Reference fixture and library versions are in
+`backend/eval/siglip/fixtures/fixture-metadata.json`. Run the five-image FP16
+ONNX check with `python -m pytest backend/eval/siglip/test_onnx_parity.py`, and
+the browser parity/latency check with `cd client; npm run test:siglip`.
 
 ## Task 2 — Visible demo-page scan (2026-11-11)
 

@@ -6,6 +6,15 @@ import manifest from "./manifest.json";
 
 export default defineConfig({
   plugins: [react(), crx({ manifest })],
+  server: {
+    headers: {
+      "Cross-Origin-Embedder-Policy": "require-corp",
+      "Cross-Origin-Opener-Policy": "same-origin",
+    },
+    watch: {
+      ignored: ["**/public/models/**"],
+    },
+  },
   build: {
     target: "esnext",
     rollupOptions: {

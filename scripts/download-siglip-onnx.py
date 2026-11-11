@@ -1,113 +1,174 @@
-#!/usr/bin/env python3
-"""
-download-siglip-onnx.py — Download and convert SigLIP-Base-Patch16-224 to FP16 ONNX.
-
-Requirements:
-    pip install optimum[exporters] transformers torch onnx onnxruntime
-
-Usage:
-    python scripts/download-siglip-onnx.py [--out-dir client/public/models]
-
-After running, place the generated .onnx file in `client/public/models/` and
-update the extension's onnxModelUrl setting to point to it.
-
-The script downloads the vision encoder only (no text encoder needed for VDLM).
-Output file: siglip-base-patch16-224-vision.onnx (~180 MB fp32, ~90 MB fp16)
-
-NOTE: This downloads from HuggingFace Hub. Set HF_TOKEN environment variable
-      if you need authenticated access.
-"""
+#!/usr/bin/env python
+"""Export the Hugging Face SigLIP vision tower as a checked FP16 ONNX graph."""
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
+import onnx
+import numpy as np
+import torch
+from onnxconverter_common import float16
+from transformers import SiglipVisionModel
 
-def main():
-    parser = argparse.ArgumentParser(description="Download SigLIP ONNX model")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from backend.eval.siglip.projection import build_projection_matrix
+
+MODEL_ID = "google/siglip-base-patch16-224"
+OUTPUT_NAME = "siglip-base-patch16-224-vision-fp16.onnx"
+ADAPTER_NAME = "siglip-base-patch16-224-adapter.onnx"
+WASM_NAME = "siglip-base-patch16-224-vision-fp32.onnx"
+
+
+class VisionTower(torch.nn.Module):
+    def __init__(self, model: SiglipVisionModel):
+        super().__init__()
+        self.model = model
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        return self.model(pixel_values=pixel_values).last_hidden_state
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
     parser.add_argument(
         "--out-dir",
-        default=str(Path(__file__).parent.parent / "client" / "public" / "models"),
-        help="Output directory for the ONNX model file",
+        default=str(Path(__file__).resolve().parents[1] / "client" / "public" / "models"),
     )
-    parser.add_argument(
-        "--fp16",
-        action="store_true",
-        default=True,
-        help="Convert to FP16 (default: True)",
-    )
-    parser.add_argument(
-        "--model-id",
-        default="google/siglip-base-patch16-224",
-        help="HuggingFace model ID",
-    )
+    parser.add_argument("--model-id", default=MODEL_ID)
     args = parser.parse_args()
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / "siglip-base-patch16-224-vision.onnx"
+    output_dir = Path(args.out_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / OUTPUT_NAME
+    adapter_path = output_dir / ADAPTER_NAME
+    wasm_path = output_dir / WASM_NAME
+    fp32_path = wasm_path
+    if output_path.exists() or adapter_path.exists() or wasm_path.exists():
+        raise FileExistsError(f"Refusing to overwrite existing model files in {output_dir}")
 
-    if out_file.exists():
-        print(f"[INFO] Model already exists at {out_file}")
-        print(f"[INFO] Set onnxModelUrl to: http://localhost:<port>/models/{out_file.name}")
-        return 0
-
-    try:
-        from optimum.exporters.onnx import main_export
-        from optimum.exporters.onnx.model_configs import SiglipVisionModelOnnxConfig
-    except ImportError:
-        print("[ERROR] optimum not installed. Run:")
-        print("    pip install 'optimum[exporters]' transformers torch")
-        return 1
-
-    print(f"[INFO] Downloading and exporting {args.model_id} to ONNX...")
-    print(f"[INFO] Output: {out_dir}")
-
-    try:
-        main_export(
-            model_name_or_path=args.model_id,
-            output=out_dir,
-            task="feature-extraction",
-            opset=17,
-            framework="pt",
-            fp16=args.fp16,
-            device="cpu",
-            no_post_process=False,
+    model = VisionTower(SiglipVisionModel.from_pretrained(args.model_id).eval().cpu().float()).eval()
+    sample = torch.zeros((1, 3, 224, 224), dtype=torch.float32)
+    with torch.inference_mode():
+        torch.onnx.export(
+            model,
+            (sample,),
+            str(fp32_path),
+            input_names=["pixel_values"],
+            output_names=["last_hidden_state"],
+            opset_version=17,
+            do_constant_folding=True,
+            dynamo=False,
         )
-    except Exception as exc:
-        print(f"[ERROR] Export failed: {exc}")
-        print()
-        print("Manual fallback steps:")
-        print("  1. pip install transformers optimum[exporters] onnxruntime")
-        print("  2. python -c \"")
-        print("     from optimum.exporters.onnx import main_export")
-        print(f"     main_export('{args.model_id}', output='{out_dir}',")
-        print("         task='feature-extraction', opset=17, fp16=True)")
-        print("     \"")
-        return 1
 
-    # Rename the vision model output if needed
-    vision_model = out_dir / "model.onnx"
-    if vision_model.exists() and not out_file.exists():
-        vision_model.rename(out_file)
-        print(f"[INFO] Renamed model.onnx → {out_file.name}")
+    graph = onnx.load(str(fp32_path))
+    graph = float16.convert_float_to_float16(graph, keep_io_types=True)
+    graph_input = graph.graph.input[0]
+    original_input = graph_input.name
+    fp16_input = f"{original_input}_fp16"
+    for node in graph.graph.node:
+        for index, name in enumerate(node.input):
+            if name == original_input:
+                node.input[index] = fp16_input
+    graph.graph.node.insert(
+        0,
+        onnx.helper.make_node(
+            "Cast",
+            [original_input],
+            [fp16_input],
+            to=onnx.TensorProto.FLOAT16,
+            name="cast_pixel_values_to_fp16",
+        ),
+    )
 
-    if out_file.exists():
-        size_mb = out_file.stat().st_size / 1024 / 1024
-        print(f"\n✓ Success! Model: {out_file} ({size_mb:.1f} MB)")
-        print(f"\nNext steps:")
-        print(f"  1. Serve the model (or copy to extension's web-accessible resources):")
-        print(f"     python -m http.server 9876 --directory {out_dir}")
-        print(f"  2. In extension settings, set onnxModelUrl:")
-        print(f"     http://localhost:9876/{out_file.name}")
-        print(f"  3. Set visionMode to 'onnx' in extension settings.")
-        return 0
-    else:
-        print("[ERROR] Export succeeded but output file not found.")
-        return 1
+    graph_output = graph.graph.output[0]
+    original_output = graph_output.name
+    fp16_output = f"{original_output}_fp16"
+    output_producer = next(
+        node for node in graph.graph.node if original_output in node.output
+    )
+    for index, name in enumerate(output_producer.output):
+        if name == original_output:
+            output_producer.output[index] = fp16_output
+    graph.graph.node.append(
+        onnx.helper.make_node(
+            "Cast",
+            [fp16_output],
+            [original_output],
+            to=onnx.TensorProto.FLOAT,
+            name="cast_last_hidden_state_to_fp32",
+        )
+    )
+    onnx.checker.check_model(graph)
+    onnx.save(graph, str(output_path))
+    export_adapter(adapter_path)
+
+    exported = onnx.load(str(output_path), load_external_data=False)
+    onnx.checker.check_model(exported)
+    fp32_exported = onnx.load(str(wasm_path), load_external_data=False)
+    onnx.checker.check_model(fp32_exported)
+    input_shape = [d.dim_value for d in exported.graph.input[0].type.tensor_type.shape.dim]
+    output_shape = [d.dim_value for d in exported.graph.output[0].type.tensor_type.shape.dim]
+    if input_shape != [1, 3, 224, 224] or output_shape != [1, 196, 768]:
+        output_path.unlink()
+        raise RuntimeError(f"Unexpected exported IO shapes: {input_shape} -> {output_shape}")
+    print(f"Exported vision model {output_path} ({output_path.stat().st_size} bytes)")
+    print(f"Exported WASM FP32 vision model {wasm_path} ({wasm_path.stat().st_size} bytes)")
+    print(f"Exported fixed adapter {adapter_path} ({adapter_path.stat().st_size} bytes)")
+
+
+def export_adapter(path: Path) -> None:
+    import onnx.helper as helper
+    from onnx import TensorProto
+
+    def int64_initializer(name: str, values: list[int]) -> onnx.TensorProto:
+        return helper.make_tensor(name, TensorProto.INT64, [len(values)], values)
+
+    initializers = [
+        int64_initializer("grid_shape", [1, 14, 14, 768]),
+        int64_initializer("target_size", [1, 768, 24, 24]),
+        int64_initializer("flat_shape", [576, 768]),
+        int64_initializer("output_shape", [1, 576, 1152]),
+        helper.make_tensor(
+            "projection",
+            TensorProto.FLOAT,
+            [768, 1152],
+            build_projection_matrix().astype(np.float32).ravel().tolist(),
+        ),
+    ]
+    nodes = [
+        helper.make_node("Reshape", ["patch_embeddings", "grid_shape"], ["patch_grid"]),
+        helper.make_node("Transpose", ["patch_grid"], ["patch_grid_nchw"], perm=[0, 3, 1, 2]),
+        helper.make_node(
+            "Resize",
+            ["patch_grid_nchw", "", "", "target_size"],
+            ["upsampled_nchw"],
+            mode="linear",
+            coordinate_transformation_mode="half_pixel",
+            nearest_mode="floor",
+        ),
+        helper.make_node("Transpose", ["upsampled_nchw"], ["upsampled_nhwc"], perm=[0, 2, 3, 1]),
+        helper.make_node("Reshape", ["upsampled_nhwc", "flat_shape"], ["flat_patches"]),
+        helper.make_node("MatMul", ["flat_patches", "projection"], ["projected"]),
+        helper.make_node("Reshape", ["projected", "output_shape"], ["adapted_embeddings"]),
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "siglip_patch_adapter",
+        [helper.make_tensor_value_info("patch_embeddings", TensorProto.FLOAT, [1, 196, 768])],
+        [helper.make_tensor_value_info("adapted_embeddings", TensorProto.FLOAT, [1, 576, 1152])],
+        initializers,
+    )
+    model = helper.make_model(
+        graph,
+        producer_name="vdlm-siglip-adapter",
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = min(model.ir_version, 10)
+    onnx.checker.check_model(model)
+    onnx.save(model, path)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
-
+    main()

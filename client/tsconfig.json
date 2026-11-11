@@ -10,7 +10,7 @@
     "noEmit": true,
     "isolatedModules": true,
     "resolveJsonModule": true,
-    "types": ["chrome", "vitest/globals", "@webgpu/types"]
+    "types": ["chrome", "vite/client", "vitest/globals", "@webgpu/types"]
   },
   "include": ["src", "tests", "vite.config.ts"],
   "exclude": ["vitest.config.ts"]

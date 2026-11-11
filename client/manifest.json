@@ -3,6 +3,12 @@
   "name": "VDLM Browser Agent",
   "description": "Privacy-preserving visual browser agent (ISRO 26171)",
   "version": "0.1.0",
+  "cross_origin_embedder_policy": {
+    "value": "require-corp"
+  },
+  "cross_origin_opener_policy": {
+    "value": "same-origin"
+  },
   "permissions": [
     "activeTab",
     "storage",

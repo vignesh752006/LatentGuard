@@ -1,0 +1,38 @@
+{
+  "seed": 3735928559,
+  "model_id": "google/siglip-base-patch16-224",
+  "input": "RGB, PIL bilinear resize 224x224, float32 /255, normalize (x-0.5)/0.5, CHW",
+  "reference_output": "SiglipVisionModel.last_hidden_state, [196,768], float32, CPU",
+  "versions": {
+    "python": "3.12.10",
+    "torch": "2.14.0+cpu",
+    "transformers": "4.57.6",
+    "numpy": "2.5.3",
+    "pillow": "13.0.0",
+    "onnx": "1.23.2",
+    "onnxconverter_common": "1.16.0",
+    "onnxruntime": "1.31.1"
+  },
+  "images": [
+    {
+      "file": "login.png",
+      "source": "Task 2 demo screenshot"
+    },
+    {
+      "file": "checkout.png",
+      "source": "Task 2 demo screenshot"
+    },
+    {
+      "file": "natural-iss073e0763824.jpg",
+      "source": "NASA image API asset"
+    },
+    {
+      "file": "natural-iss009e05944.jpg",
+      "source": "NASA image API asset"
+    },
+    {
+      "file": "natural-iss009e05953.jpg",
+      "source": "NASA image API asset"
+    }
+  ]
+}

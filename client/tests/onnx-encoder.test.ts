@@ -1,177 +1,87 @@
-/**
- * Task 3 — SigLIP adapter unit tests
- *
- * Tests the shape/determinism of:
- *   - buildProjectionMatrix: 768×1152, columns normalized
- *   - bilinearUpsample: 14×14×768 → 24×24×768
- *   - projectEmbeddings: [N, 768] → [N, 1152]
- *   - Full adapter pipeline shape (without actual ONNX inference)
- *
- * Note: OnnxVisionEncoder.init() in "onnx" mode requires the actual ONNX model
- * file and will throw ONNX_MODEL_MISSING in a test environment (no model present).
- * This is the correct behavior per TASK 3 spec ("fail loudly").
- */
-
-import { describe, it, expect } from 'vitest';
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { describe, expect, it } from "vitest";
 import {
-  buildProjectionMatrix,
   bilinearUpsample,
+  buildProjectionMatrix,
   projectEmbeddings,
-  SIGLIP_PATCHES,
   SIGLIP_DIM,
-  TARGET_PATCHES,
-  TARGET_DIM,
   SIGLIP_GRID,
+  SIGLIP_PATCHES,
+  TARGET_DIM,
   TARGET_GRID,
-} from '../src/vision/onnx-encoder';
-import { TENSOR_CONTRACT } from '../src/protocol/messages';
+  TARGET_PATCHES,
+} from "../src/vision/onnx-encoder";
+import { TENSOR_CONTRACT } from "../src/protocol/messages";
 
-describe('Task 3: SigLIP adapter — projection matrix', () => {
-  it('buildProjectionMatrix returns Float32Array of shape [768, 1152]', () => {
-    const P = buildProjectionMatrix();
-    expect(P).toBeInstanceOf(Float32Array);
-    expect(P.length).toBe(SIGLIP_DIM * TARGET_DIM);  // 768 * 1152 = 884736
-  });
-
-  it('projection matrix columns are l2-normalized (norm ≈ 1.0)', () => {
-    const P = buildProjectionMatrix();
-    // Check first 5 columns
-    for (let j = 0; j < 5; j++) {
-      let norm = 0;
-      for (let i = 0; i < SIGLIP_DIM; i++) {
-        const v = P[i * TARGET_DIM + j]!;
-        norm += v * v;
+describe("SigLIP projection adapter", () => {
+  it("builds the 768x1152 projection with unit-norm columns", () => {
+    const matrix = buildProjectionMatrix();
+    expect(matrix).toBeInstanceOf(Float32Array);
+    expect(matrix.length).toBe(SIGLIP_DIM * TARGET_DIM);
+    for (let column = 0; column < 5; column++) {
+      let squaredNorm = 0;
+      for (let row = 0; row < SIGLIP_DIM; row++) {
+        const value = matrix[row * TARGET_DIM + column]!;
+        squaredNorm += value * value;
       }
-      norm = Math.sqrt(norm);
-      expect(norm).toBeCloseTo(1.0, 2);  // ±0.005
+      expect(Math.sqrt(squaredNorm)).toBeCloseTo(1, 5);
     }
   });
 
-  it('buildProjectionMatrix is deterministic (same output every call)', () => {
-    const P1 = buildProjectionMatrix();
-    const P2 = buildProjectionMatrix();
-    // Both should be identical (singleton or same seed)
-    expect(P1[0]).toBe(P2[0]);
-    expect(P1[100]).toBe(P2[100]);
-    expect(P1[P1.length - 1]).toBe(P2[P2.length - 1]);
-  });
-});
-
-describe('Task 3: SigLIP adapter — bilinear upsample', () => {
-  it('upsample 14×14×768 → 24×24×768 produces correct size', () => {
-    const src = new Float32Array(SIGLIP_GRID * SIGLIP_GRID * SIGLIP_DIM);
-    // Fill with index values for verification
-    for (let i = 0; i < src.length; i++) src[i] = i * 0.001;
-
-    const dst = bilinearUpsample(src, SIGLIP_GRID, SIGLIP_GRID, SIGLIP_DIM, TARGET_GRID, TARGET_GRID);
-    expect(dst).toBeInstanceOf(Float32Array);
-    expect(dst.length).toBe(TARGET_GRID * TARGET_GRID * SIGLIP_DIM);  // 24*24*768 = 442368
+  it("matches the Python projection-matrix fixture byte for byte", () => {
+    const matrix = buildProjectionMatrix();
+    const hash = createHash("sha256")
+      .update(Buffer.from(matrix.buffer, matrix.byteOffset, matrix.byteLength))
+      .digest("hex");
+    const expected = readFileSync(
+      path.resolve(process.cwd(), "..", "backend", "eval", "siglip", "fixtures", "projection-matrix.sha256"),
+      "ascii",
+    ).trim();
+    expect(hash).toBe(expected);
   });
 
-  it('upsample of a constant array returns the same constant', () => {
-    const C = 42;
-    const src = new Float32Array(SIGLIP_GRID * SIGLIP_GRID * 3).fill(C);
-    const dst = bilinearUpsample(src, SIGLIP_GRID, SIGLIP_GRID, 3, TARGET_GRID, TARGET_GRID);
-    for (let i = 0; i < dst.length; i++) {
-      expect(dst[i]).toBeCloseTo(C, 4);
-    }
+  it("upsamples 14x14x768 to 24x24x768 and preserves a constant", () => {
+    const source = new Float32Array(SIGLIP_GRID * SIGLIP_GRID * SIGLIP_DIM).fill(42);
+    const target = bilinearUpsample(source, SIGLIP_GRID, SIGLIP_GRID, SIGLIP_DIM, TARGET_GRID, TARGET_GRID);
+    expect(target.length).toBe(TARGET_PATCHES * SIGLIP_DIM);
+    for (const value of target) expect(value).toBeCloseTo(42, 5);
   });
 
-  it('upsample 1×1→2×2 center pixel (identity check)', () => {
-    const src = new Float32Array([3.14]);
-    const dst = bilinearUpsample(src, 1, 1, 1, 2, 2);
-    expect(dst.length).toBe(4);
-    for (const v of dst) expect(v).toBeCloseTo(3.14, 4);
+  it("clamps bilinear edge coordinates instead of extrapolating", () => {
+    const source = Float32Array.of(1, 2, 3, 4);
+    const target = bilinearUpsample(source, 2, 2, 1, 4, 4);
+    expect(target[0]).toBe(1);
+    expect(target[3]).toBe(2);
+    expect(target[12]).toBe(3);
+    expect(target[15]).toBe(4);
   });
 
-  it('upsample is deterministic (same input → same output)', () => {
-    const src = new Float32Array(SIGLIP_GRID * SIGLIP_GRID * SIGLIP_DIM);
-    for (let i = 0; i < src.length; i++) src[i] = Math.sin(i * 0.1);
-    const dst1 = bilinearUpsample(src, SIGLIP_GRID, SIGLIP_GRID, SIGLIP_DIM, TARGET_GRID, TARGET_GRID);
-    const dst2 = bilinearUpsample(src, SIGLIP_GRID, SIGLIP_GRID, SIGLIP_DIM, TARGET_GRID, TARGET_GRID);
-    expect(dst1[0]).toBe(dst2[0]);
-    expect(dst1[1000]).toBe(dst2[1000]);
-  });
-});
-
-describe('Task 3: SigLIP adapter — projection', () => {
-  it('projectEmbeddings [196, 768] → [196, 1152] correct shape', () => {
-    const embeddings = new Float32Array(SIGLIP_PATCHES * SIGLIP_DIM);
-    for (let i = 0; i < embeddings.length; i++) embeddings[i] = Math.random();
-    const out = projectEmbeddings(embeddings, SIGLIP_PATCHES);
-    expect(out.length).toBe(SIGLIP_PATCHES * TARGET_DIM);  // 196 * 1152
-  });
-
-  it('projectEmbeddings [576, 768] → [576, 1152] correct shape', () => {
-    const embeddings = new Float32Array(TARGET_PATCHES * SIGLIP_DIM);
-    for (let i = 0; i < embeddings.length; i++) embeddings[i] = Math.random();
-    const out = projectEmbeddings(embeddings, TARGET_PATCHES);
-    expect(out.length).toBe(TARGET_PATCHES * TARGET_DIM);  // 576 * 1152 = 663552
-  });
-
-  it('projectEmbeddings is deterministic (same seed → same projection)', () => {
-    const embeddings = new Float32Array(5 * SIGLIP_DIM);
-    for (let i = 0; i < embeddings.length; i++) embeddings[i] = i * 0.01;
-    const out1 = projectEmbeddings(embeddings, 5);
-    const out2 = projectEmbeddings(embeddings, 5);
-    expect(out1[0]).toBe(out2[0]);
-    expect(out1[out1.length - 1]).toBe(out2[out2.length - 1]);
-  });
-
-  it('zero input → zero output', () => {
-    const embeddings = new Float32Array(2 * SIGLIP_DIM);  // all zeros
-    const out = projectEmbeddings(embeddings, 2);
-    for (const v of out) expect(Math.abs(v)).toBeLessThan(1e-10);
-  });
-});
-
-describe('Task 3: SigLIP adapter — full pipeline shape (no ONNX)', () => {
-  it('upsample+project pipeline: 196×768 → 576×1152', () => {
-    // Simulate SigLIP output [196, 768]
-    const siglipOut = new Float32Array(SIGLIP_PATCHES * SIGLIP_DIM);
-    for (let i = 0; i < siglipOut.length; i++) siglipOut[i] = Math.sin(i * 0.1);
-
-    // 1. Bilinear upsample 14×14×768 → 24×24×768
-    const upsampled = bilinearUpsample(
-      siglipOut, SIGLIP_GRID, SIGLIP_GRID, SIGLIP_DIM, TARGET_GRID, TARGET_GRID,
+  it("adapts a fixed [196,768] tensor to [576,1152] deterministically", () => {
+    const source = Float32Array.from(
+      { length: SIGLIP_PATCHES * SIGLIP_DIM },
+      (_, index) => Math.sin(index * 0.01),
     );
-    expect(upsampled.length).toBe(TARGET_PATCHES * SIGLIP_DIM);
-
-    // 2. Project 576×768 → 576×1152
-    const projected = projectEmbeddings(upsampled, TARGET_PATCHES);
-    expect(projected.length).toBe(TARGET_PATCHES * TARGET_DIM);
-    expect(projected.length).toBe(TENSOR_CONTRACT.patchCount * TENSOR_CONTRACT.embeddingDim);
-  });
-
-  it('pipeline is deterministic for fixed SigLIP output', () => {
-    const siglipOut = new Float32Array(SIGLIP_PATCHES * SIGLIP_DIM);
-    for (let i = 0; i < siglipOut.length; i++) siglipOut[i] = Math.cos(i * 0.05);
-
-    const run = () => {
-      const up = bilinearUpsample(siglipOut, SIGLIP_GRID, SIGLIP_GRID, SIGLIP_DIM, TARGET_GRID, TARGET_GRID);
-      return projectEmbeddings(up, TARGET_PATCHES);
-    };
-
-    const r1 = run();
-    const r2 = run();
-    for (let i = 0; i < r1.length; i += 1000) {
-      expect(r1[i]).toBe(r2[i]);
-    }
+    const upsampled = bilinearUpsample(source, SIGLIP_GRID, SIGLIP_GRID, SIGLIP_DIM, TARGET_GRID, TARGET_GRID);
+    const first = projectEmbeddings(upsampled, TARGET_PATCHES);
+    const second = projectEmbeddings(upsampled, TARGET_PATCHES);
+    expect(first.length).toBe(TARGET_PATCHES * TARGET_DIM);
+    expect(first.length).toBe(TENSOR_CONTRACT.patchCount * TENSOR_CONTRACT.embeddingDim);
+    expect(first).toEqual(second);
   });
 });
 
-describe('Task 3: OnnxVisionEncoder — fail loudly in onnx mode', () => {
-  it('init() throws ONNX_MODEL_MISSING when no modelUrl given', async () => {
-    // Dynamically import to avoid top-level module issues in test environment
-    const { OnnxVisionEncoder } = await import('../src/vision/onnx-encoder');
-    const encoder = new OnnxVisionEncoder('', 'onnx');
-    await expect(encoder.init()).rejects.toThrow('ONNX_MODEL_MISSING');
+describe("OnnxVisionEncoder model loading", () => {
+  it("throws a clear error when no model URL is configured", async () => {
+    const { OnnxVisionEncoder } = await import("../src/vision/onnx-encoder");
+    await expect(new OnnxVisionEncoder("").init()).rejects.toThrow("ONNX_MODEL_MISSING");
   });
 
-  it('init() throws ONNX_MODEL_MISSING for a bad model URL in onnx mode', async () => {
-    const { OnnxVisionEncoder } = await import('../src/vision/onnx-encoder');
-    const encoder = new OnnxVisionEncoder('http://localhost:9/nonexistent.onnx', 'onnx');
-    await expect(encoder.init()).rejects.toThrow('ONNX_MODEL_MISSING');
+  it("throws a clear load error when the model file is missing", async () => {
+    const { OnnxVisionEncoder } = await import("../src/vision/onnx-encoder");
+    await expect(
+      new OnnxVisionEncoder("http://127.0.0.1:9/nonexistent.onnx", ["wasm"]).init(),
+    ).rejects.toThrow("ONNX_MODEL_LOAD_FAILED");
   });
 });
-

@@ -74,9 +74,15 @@ export function encodeTensorPayload(
     compression = "zlib";
   }
 
-  console.info("[VDLM] wire bytes:", bytes.byteLength, "compression:", compression);
-
   const base64 = uint8ToBase64(bytes);
+  console.info(
+    "[VDLM] wire bytes:",
+    base64.length,
+    "base64 bytes; compressed bytes:",
+    bytes.byteLength,
+    "compression:",
+    compression,
+  );
   return {
     encoding: "base64",
     dtype: "float16",
@@ -212,16 +218,17 @@ export function encodeCompactTensorPayload(
 
   // Compress with zlib
   const compressed = zlibSync(packed);
+  const base64 = uint8ToBase64(compressed);
   console.info(
     "[VDLM] compact wire bytes:",
+    base64.length,
+    "base64 bytes; compressed bytes:",
     compressed.byteLength,
     "ratio:",
     (compressed.byteLength / 1327104).toFixed(3),
     "topKPercent:",
     topK,
   );
-
-  const base64 = uint8ToBase64(compressed);
   return {
     encoding: "base64",
     dtype: "int8_quantized",

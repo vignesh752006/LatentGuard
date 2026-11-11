@@ -9,6 +9,8 @@
     "build": "npm run build:wasm && tsc --noEmit && vite build",
     "test": "vitest run --config vitest.config.ts",
     "test:e2e": "playwright test --config playwright.config.ts",
+    "test:siglip": "playwright test --config playwright.siglip.config.ts",
+    "capture:siglip-fixtures": "node scripts/capture-siglip-demo-fixtures.mjs",
     "test:watch": "vitest --config vitest.config.ts"
   },
   "dependencies": {

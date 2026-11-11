@@ -1,309 +1,249 @@
-/**
- * OnnxVisionEncoder — SigLIP-Base-Patch16-224 fp16 ONNX encoder
- *
- * Architecture:
- *   - Input:  224×224 image → CHW float32, mean/std=0.5 (SigLIP standard)
- *   - ONNX:   SigLIP-Base produces 196 patches × 768 embedding (14×14 grid)
- *   - Adapter: bilinear upsample 14×14 → 24×24 (576 patches), then
- *              fixed-seed linear projection 768 → 1152 to match the
- *              576×1152 wire contract.
- *
- * Adapter method (documented per TASK 3 spec):
- *   1. Reshape 196×768 output to [14, 14, 768].
- *   2. Bilinear upsample to [24, 24, 768] → flatten to [576, 768].
- *   3. Project 768 → 1152 via a fixed-seed deterministic linear matrix
- *      (orthogonal basis from seeded PRNG, seed=0x5IG1IP).
- *   The projection matrix P (768×1152) is computed once at init time and
- *   reused. It is deterministic and seeded, so the same image always
- *   produces the same output.
- *
- * Failure modes:
- *   - In "onnx" mode (default): if the model file is missing or fails to
- *     load, `init()` throws immediately with ONNX_MODEL_MISSING.
- *     There is NO silent fallback in "onnx" mode.
- *   - In "mock" mode: falls back to the WebGPU mock encoder (dev only).
- *
- * Setup:
- *   See scripts/download-siglip-onnx.py and README steps.
- */
-
+import type { InferenceSession, Tensor as OrtTensor } from "onnxruntime-web";
+import wasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.asyncify.wasm?url";
 import { TENSOR_CONTRACT } from "../protocol/messages";
-import { VisionEncoder } from "./mock-gpu-encoder";
+import {
+  buildProjectionMatrix,
+  projectEmbeddings,
+  SIGLIP_DIM,
+  TARGET_DIM,
+} from "./projection";
 
-// ---- Adapter constants ---------------------------------------------------------
+export const SIGLIP_PATCHES = 196;
+export const TARGET_PATCHES = TENSOR_CONTRACT.patchCount;
+export const SIGLIP_GRID = 14;
+export const TARGET_GRID = 24;
+const SIGLIP_INPUT_SIZE = 224;
+const MODEL_OUTPUT_NAME = "last_hidden_state";
+const MODEL_INPUT_NAME = "pixel_values";
 
-const SIGLIP_PATCHES = 196;      // 14×14
-const SIGLIP_DIM = 768;
-const TARGET_PATCHES = 576;      // 24×24  (TENSOR_CONTRACT.patchCount)
-const TARGET_DIM = 1152;         // TENSOR_CONTRACT.embeddingDim
-const SIGLIP_GRID = 14;
-const TARGET_GRID = 24;
+type ExecutionProvider = "webgpu" | "wasm";
 
-// SigLIP preprocessing: resize to 224×224, normalize to [-1, 1] with mean=std=0.5
-const SIGLIP_MEAN = 0.5;
-const SIGLIP_STD = 0.5;
-
-// ---- Deterministic projection matrix ------------------------------------------
-
-/** Seeded linear congruential generator (deterministic, fast). */
-function seededLCG(seed: number): () => number {
-  let s = seed >>> 0;
-  return () => {
-    s = (Math.imul(1664525, s) + 1013904223) >>> 0;
-    return (s / 0x100000000) * 2 - 1;  // [-1, 1]
-  };
-}
-
-/**
- * Build the fixed 768→1152 projection matrix using a seeded PRNG.
- * Rows are l2-normalized to preserve embedding magnitude.
- * Seed: 0x5IG1IP = 0x53494701 = 1397670657 (ASCII for "SIG\x01")
- */
-function buildProjectionMatrix(): Float32Array {
-  const SEED = 1397670657;
-  const rng = seededLCG(SEED);
-  const P = new Float32Array(SIGLIP_DIM * TARGET_DIM);  // [768, 1152]
-
-  // Fill with random values
-  for (let i = 0; i < P.length; i++) P[i] = rng();
-
-  // L2-normalize each output column (across the 768 input rows)
-  for (let j = 0; j < TARGET_DIM; j++) {
-    let norm = 0;
-    for (let i = 0; i < SIGLIP_DIM; i++) {
-      const v = P[i * TARGET_DIM + j]!;
-      norm += v * v;
-    }
-    norm = Math.sqrt(norm) + 1e-8;
-    for (let i = 0; i < SIGLIP_DIM; i++) {
-      P[i * TARGET_DIM + j]! /= norm;
-    }
-  }
-
-  return P;
-}
-
-// Singleton: computed once
-let _projMatrix: Float32Array | null = null;
-function getProjectionMatrix(): Float32Array {
-  if (!_projMatrix) _projMatrix = buildProjectionMatrix();
-  return _projMatrix;
-}
-
-// ---- Bilinear upsample --------------------------------------------------------
-
-/**
- * Bilinear upsample a [srcH, srcW, C] tensor to [dstH, dstW, C].
- * Returns a new Float32Array of length dstH*dstW*C.
- */
-function bilinearUpsample(
+export function bilinearUpsample(
   src: Float32Array,
-  srcH: number, srcW: number, C: number,
-  dstH: number, dstW: number,
+  srcH: number,
+  srcW: number,
+  channels: number,
+  dstH: number,
+  dstW: number,
 ): Float32Array {
-  const dst = new Float32Array(dstH * dstW * C);
+  if (src.length !== srcH * srcW * channels) {
+    throw new Error(`Expected ${srcH * srcW * channels} source values, got ${src.length}`);
+  }
+  const dst = new Float32Array(dstH * dstW * channels);
   const scaleH = srcH / dstH;
   const scaleW = srcW / dstW;
 
   for (let oy = 0; oy < dstH; oy++) {
     for (let ox = 0; ox < dstW; ox++) {
-      const iy = (oy + 0.5) * scaleH - 0.5;
-      const ix = (ox + 0.5) * scaleW - 0.5;
-      const iy0 = Math.max(0, Math.min(srcH - 1, Math.floor(iy)));
+      const iy = Math.max(0, Math.min(srcH - 1, (oy + 0.5) * scaleH - 0.5));
+      const ix = Math.max(0, Math.min(srcW - 1, (ox + 0.5) * scaleW - 0.5));
+      const iy0 = Math.floor(iy);
       const iy1 = Math.min(srcH - 1, iy0 + 1);
-      const ix0 = Math.max(0, Math.min(srcW - 1, Math.floor(ix)));
+      const ix0 = Math.floor(ix);
       const ix1 = Math.min(srcW - 1, ix0 + 1);
       const dy = iy - iy0;
       const dx = ix - ix0;
+      const dstBase = (oy * dstW + ox) * channels;
+      const src00 = (iy0 * srcW + ix0) * channels;
+      const src01 = (iy0 * srcW + ix1) * channels;
+      const src10 = (iy1 * srcW + ix0) * channels;
+      const src11 = (iy1 * srcW + ix1) * channels;
 
-      const dstBase = (oy * dstW + ox) * C;
-      const src00 = (iy0 * srcW + ix0) * C;
-      const src01 = (iy0 * srcW + ix1) * C;
-      const src10 = (iy1 * srcW + ix0) * C;
-      const src11 = (iy1 * srcW + ix1) * C;
-
-      for (let c = 0; c < C; c++) {
-        dst[dstBase + c] =
-          (1 - dy) * ((1 - dx) * src[src00 + c]! + dx * src[src01 + c]!) +
-          dy       * ((1 - dx) * src[src10 + c]! + dx * src[src11 + c]!);
+      for (let channel = 0; channel < channels; channel++) {
+        dst[dstBase + channel] =
+          (1 - dy) * ((1 - dx) * src[src00 + channel]! + dx * src[src01 + channel]!) +
+          dy * ((1 - dx) * src[src10 + channel]! + dx * src[src11 + channel]!);
       }
     }
   }
   return dst;
 }
 
-// ---- Linear projection 768→1152 (matmul) -------------------------------------
-
-/**
- * Apply projection: [N, 768] @ [768, 1152] → [N, 1152]
- */
-function projectEmbeddings(embeddings: Float32Array, N: number): Float32Array {
-  const P = getProjectionMatrix();
-  const out = new Float32Array(N * TARGET_DIM);
-  for (let n = 0; n < N; n++) {
-    const inOff = n * SIGLIP_DIM;
-    const outOff = n * TARGET_DIM;
-    for (let j = 0; j < TARGET_DIM; j++) {
-      let sum = 0;
-      for (let i = 0; i < SIGLIP_DIM; i++) {
-        sum += embeddings[inOff + i]! * P[i * TARGET_DIM + j]!;
-      }
-      out[outOff + j] = sum;
-    }
+export function preprocessForSiglip(image: ImageData): Float32Array {
+  if (image.width <= 0 || image.height <= 0) {
+    throw new Error(`Invalid image dimensions: ${image.width}x${image.height}`);
   }
-  return out;
-}
+  const horizontal = resizeBilinear(image.data, image.width, image.height, SIGLIP_INPUT_SIZE, true);
+  const resized = resizeBilinear(horizontal, SIGLIP_INPUT_SIZE, image.height, SIGLIP_INPUT_SIZE, false);
 
-// ---- Preprocessing -----------------------------------------------------------
-
-/**
- * SigLIP preprocessing: resize 224×224, then (pixel/255 - mean) / std per channel.
- * Returns CHW float32 tensor of shape [1, 3, 224, 224].
- */
-function preprocessForSiglip(image: ImageData, inputSize: number): Float32Array {
-  // Resize to 224×224 using an OffscreenCanvas
-  const canvas = new OffscreenCanvas(inputSize, inputSize);
-  const ctx = canvas.getContext("2d")!;
-  const src = new OffscreenCanvas(image.width, image.height);
-  src.getContext("2d")!.putImageData(image, 0, 0);
-  ctx.drawImage(src, 0, 0, inputSize, inputSize);
-  const { data } = ctx.getImageData(0, 0, inputSize, inputSize);
-
-  // HWC RGBA → CHW float32, normalized
-  const N = inputSize * inputSize;
-  const tensor = new Float32Array(3 * N);  // [3, H, W]
-  for (let i = 0; i < N; i++) {
-    const r = data[i * 4]!     / 255;
-    const g = data[i * 4 + 1]! / 255;
-    const b = data[i * 4 + 2]! / 255;
-    tensor[0 * N + i] = (r - SIGLIP_MEAN) / SIGLIP_STD;  // R channel
-    tensor[1 * N + i] = (g - SIGLIP_MEAN) / SIGLIP_STD;  // G channel
-    tensor[2 * N + i] = (b - SIGLIP_MEAN) / SIGLIP_STD;  // B channel
+  const planeSize = SIGLIP_INPUT_SIZE * SIGLIP_INPUT_SIZE;
+  const tensor = new Float32Array(3 * planeSize);
+  for (let pixel = 0; pixel < planeSize; pixel++) {
+    for (let channel = 0; channel < 3; channel++) {
+      tensor[channel * planeSize + pixel] = resized[pixel * 4 + channel]! / 127.5 - 1;
+    }
   }
   return tensor;
 }
 
-// ---- OnnxVisionEncoder -------------------------------------------------------
+function resizeBilinear(
+  source: Uint8ClampedArray,
+  sourceWidth: number,
+  sourceHeight: number,
+  outputSize: number,
+  horizontal: boolean,
+): Uint8ClampedArray {
+  const inputSize = horizontal ? sourceWidth : sourceHeight;
+  const scale = inputSize / outputSize;
+  const filterScale = Math.max(1, scale);
+  const support = filterScale;
+  const weights = Array.from({ length: outputSize }, (_, output) => {
+    const center = (output + 0.5) * scale;
+    const start = Math.max(0, Math.floor(center - support + 0.5));
+    const end = Math.min(inputSize, Math.floor(center + support + 0.5));
+    const values: number[] = [];
+    let total = 0;
+    for (let input = start; input < end; input++) {
+      const weight = Math.max(0, 1 - Math.abs((input + 0.5 - center) / filterScale));
+      values.push(weight);
+      total += weight;
+    }
+    return { start, values: values.map((value) => value / total) };
+  });
+
+  const outputWidth = horizontal ? outputSize : sourceWidth;
+  const outputHeight = horizontal ? sourceHeight : outputSize;
+  const output = new Uint8ClampedArray(outputWidth * outputHeight * 4);
+  for (let y = 0; y < outputHeight; y++) {
+    for (let x = 0; x < outputWidth; x++) {
+      const outputCoordinate = horizontal ? x : y;
+      const { start, values } = weights[outputCoordinate]!;
+      for (let channel = 0; channel < 4; channel++) {
+        let value = 0;
+        for (let offset = 0; offset < values.length; offset++) {
+          const inputCoordinate = start + offset;
+          const sourcePixel = horizontal
+            ? (y * sourceWidth + inputCoordinate) * 4 + channel
+            : (inputCoordinate * sourceWidth + x) * 4 + channel;
+          value += source[sourcePixel]! * values[offset]!;
+        }
+        const outputPixel = (y * outputWidth + x) * 4 + channel;
+        output[outputPixel] = Math.floor(value + 0.5);
+      }
+    }
+  }
+  return output;
+}
 
 export class OnnxVisionEncoder {
-  private session: unknown = null;
-  private fallback: VisionEncoder | null = null;
-  private readonly modelUrl: string;
-  private readonly mode: "onnx" | "mock";
-  private loadError: string | null = null;
+  private session: InferenceSession | null = null;
+  private adapterSession: InferenceSession | null = null;
+  private readonly adapterModelUrl: string;
+  private readonly wasmModelUrl: string;
 
-  constructor(modelUrl: string, mode: "onnx" | "mock" = "onnx") {
-    this.modelUrl = modelUrl;
-    this.mode = mode;
+  constructor(
+    private readonly modelUrl: string,
+    private readonly executionProviders: ExecutionProvider[] = ["webgpu", "wasm"],
+  ) {
+    this.adapterModelUrl = modelUrl.replace(
+      /siglip-base-patch16-224-vision-(?:fp16|fp32)\.onnx(?=[?#]|$)/,
+      "siglip-base-patch16-224-adapter.onnx",
+    );
+    this.wasmModelUrl = modelUrl.replace(
+      /siglip-base-patch16-224-vision-fp16\.onnx(?=[?#]|$)/,
+      "siglip-base-patch16-224-vision-fp32.onnx",
+    );
   }
 
-  /**
-   * Initialize the encoder.
-   *
-   * - mode="onnx": throws `Error("ONNX_MODEL_MISSING: ...")` if model is absent
-   *   or fails to load. No silent fallback.
-   * - mode="mock": uses the WebGPU mock encoder (dev/test only).
-   */
   async init(): Promise<void> {
-    if (this.mode === "mock") {
-      this.fallback = new VisionEncoder();
-      await this.fallback.init();
-      return;
-    }
-
-    // "onnx" mode: fail loudly
     if (!this.modelUrl) {
       throw new Error(
         "ONNX_MODEL_MISSING: onnxModelUrl is not configured. " +
-        "Run scripts/download-siglip-onnx.py and set the model URL in extension settings.",
+        "Run scripts/download-siglip-onnx.py and configure the model URL.",
       );
     }
+    if (this.session) return;
 
-    try {
-      const ort = await import("onnxruntime-web/webgpu");
-      this.session = await ort.InferenceSession.create(this.modelUrl, {
-        executionProviders: ["webgpu", "wasm"],
-      });
-      console.info("[VDLM] SigLIP ONNX model loaded from", this.modelUrl);
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      throw new Error(`ONNX_MODEL_MISSING: Failed to load SigLIP model from "${this.modelUrl}": ${msg}`);
-    }
-
-    // Pre-compute projection matrix (warm it up)
-    getProjectionMatrix();
-  }
-
-  getStatus(): { mode: "onnx" | "mock"; error: string | null } {
-    if (this.session) return { mode: "onnx", error: null };
-    if (this.fallback) return { mode: "mock", error: null };
-    return { mode: this.mode, error: this.loadError };
-  }
-
-  /**
-   * Encode an image to the 576×1152 contract tensor.
-   *
-   * Pipeline:
-   *   image → SigLIP preprocess (224×224, CHW, mean/std=0.5)
-   *         → ONNX inference → [1, 196, 768]
-   *         → bilinear upsample 14×14→24×24 → [576, 768]
-   *         → linear project 768→1152 → [576, 1152]
-   */
-  async encode(image: ImageData): Promise<Float32Array> {
-    if (this.fallback) {
-      return this.fallback.encode(image);
-    }
-    if (!this.session) {
-      throw new Error("OnnxVisionEncoder: not initialized — call init() first");
-    }
-
-    const { patchCount, embeddingDim, inputSize } = TENSOR_CONTRACT;
     const ort = await import("onnxruntime-web/webgpu");
-    type OrtSession = Awaited<ReturnType<typeof ort.InferenceSession.create>>;
-    type OrtTensor = InstanceType<typeof ort.Tensor>;
+    ort.env.wasm.wasmPaths = { wasm: wasmUrl };
+    const failures: string[] = [];
 
-    // 1. Preprocess → CHW float32 [1, 3, 224, 224]
-    const floatData = preprocessForSiglip(image, inputSize);
-    const input = new ort.Tensor("float32", floatData, [1, 3, inputSize, inputSize]);
-
-    // 2. Run ONNX
-    const session = this.session as OrtSession;
-    const feeds: Record<string, OrtTensor> = {};
-    feeds[session.inputNames[0]!] = input;
-    const outputs = await session.run(feeds);
-    const rawOut = outputs[session.outputNames[0]!]!.data as Float32Array;
-
-    // 3. Validate raw ONNX output shape: expect [1, 196, 768] = 150528
-    const expectedRawSize = SIGLIP_PATCHES * SIGLIP_DIM;
-    if (rawOut.length !== expectedRawSize) {
-      throw new Error(
-        `SigLIP ONNX output size mismatch: expected ${expectedRawSize} (196×768), got ${rawOut.length}`,
-      );
+    for (const provider of this.executionProviders) {
+      const modelUrl = provider === "wasm" ? this.wasmModelUrl : this.modelUrl;
+      let candidateSession: InferenceSession | null = null;
+      let candidateAdapter: InferenceSession | null = null;
+      try {
+        candidateSession = await ort.InferenceSession.create(modelUrl, {
+          executionProviders: [provider],
+        });
+        candidateAdapter = await ort.InferenceSession.create(this.adapterModelUrl, {
+          executionProviders: [provider],
+        });
+        if (!candidateSession.inputNames.includes(MODEL_INPUT_NAME) ||
+            !candidateSession.outputNames.includes(MODEL_OUTPUT_NAME) ||
+            !candidateAdapter.inputNames.includes("patch_embeddings") ||
+            !candidateAdapter.outputNames.includes("adapted_embeddings")) {
+          throw new Error("Model must expose the SigLIP vision and fixed patch-adapter inputs and outputs");
+        }
+        this.session = candidateSession;
+        this.adapterSession = candidateAdapter;
+        buildProjectionMatrix();
+        return;
+      } catch (error) {
+        if (candidateAdapter) await candidateAdapter.release();
+        if (candidateSession) await candidateSession.release();
+        const detail = error instanceof Error ? error.message : String(error);
+        failures.push(`${provider} (${modelUrl}): ${detail}`);
+      }
     }
 
-    // 4. Bilinear upsample: [14, 14, 768] → [24, 24, 768]
-    const upsampled = bilinearUpsample(rawOut, SIGLIP_GRID, SIGLIP_GRID, SIGLIP_DIM, TARGET_GRID, TARGET_GRID);
+    throw new Error(
+      `ONNX_MODEL_LOAD_FAILED: unable to load a supported model for "${this.modelUrl}": ${failures.join("; ")}`,
+    );
+  }
 
-    // 5. Linear project: [576, 768] → [576, 1152]
-    const projected = projectEmbeddings(upsampled, TARGET_PATCHES);
-
-    // 6. Validate output
-    if (projected.length !== patchCount * embeddingDim) {
+  async encodePatches(image: ImageData): Promise<Float32Array> {
+    if (!this.session) throw new Error("OnnxVisionEncoder is not initialized; call init() first");
+    const ort = await import("onnxruntime-web/webgpu");
+    const input = new ort.Tensor(
+      "float32",
+      preprocessForSiglip(image),
+      [1, 3, SIGLIP_INPUT_SIZE, SIGLIP_INPUT_SIZE],
+    );
+    const feeds: Record<string, OrtTensor> = { [MODEL_INPUT_NAME]: input };
+    const outputs = await this.session.run(feeds);
+    const output = outputs[MODEL_OUTPUT_NAME];
+    if (!output || output.dims.join(",") !== "1,196,768" || !(output.data instanceof Float32Array)) {
       throw new Error(
-        `Adapter output size mismatch: expected ${patchCount * embeddingDim}, got ${projected.length}`,
+        `Invalid SigLIP output; expected float32 [1,196,768], got ${
+          output ? `${output.data.constructor.name} [${output.dims.join(",")}]` : "no output"
+        }`,
       );
     }
+    return output.data;
+  }
 
-    return projected;
+  async adaptPatches(patchEmbeddings: Float32Array): Promise<Float32Array> {
+    if (!this.adapterSession) throw new Error("SigLIP adapter model is not initialized");
+    const ort = await import("onnxruntime-web/webgpu");
+    const adapterInput = new ort.Tensor("float32", patchEmbeddings, [1, SIGLIP_PATCHES, SIGLIP_DIM]);
+    const outputs = await this.adapterSession.run({ patch_embeddings: adapterInput });
+    const output = outputs.adapted_embeddings;
+    if (!output || output.dims.join(",") !== "1,576,1152" || !(output.data instanceof Float32Array)) {
+      throw new Error(
+        `Invalid adapter output; expected float32 [1,576,1152], got ${
+          output ? `${output.data.constructor.name} [${output.dims.join(",")}]` : "no output"
+        }`,
+      );
+    }
+    return output.data;
+  }
+
+  async encode(image: ImageData): Promise<Float32Array> {
+    return this.adaptPatches(await this.encodePatches(image));
+  }
+
+  getStatus(): { mode: "onnx"; error: string | null } {
+    return { mode: "onnx", error: null };
   }
 
   destroy(): void {
-    this.fallback?.destroy();
+    if (this.session) void this.session.release();
+    if (this.adapterSession) void this.adapterSession.release();
     this.session = null;
+    this.adapterSession = null;
   }
 }
 
-// ---- Exported for testing ---------------------------------------------------
-
-export { bilinearUpsample, buildProjectionMatrix, projectEmbeddings, preprocessForSiglip };
-export { SIGLIP_PATCHES, SIGLIP_DIM, TARGET_PATCHES, TARGET_DIM, SIGLIP_GRID, TARGET_GRID };
+export { buildProjectionMatrix, projectEmbeddings };
+export { SIGLIP_DIM, TARGET_DIM };
