@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<!--
+  VDLM Demo Page: Checkout Form
+  Fixed, deterministic layout for reproducible I_sens testing.
+  Viewport: 1920×1080, checkout form at left=720px, top=270px, width=480px, height=510px.
+  Sensitive regions (normalized, 1920×1080):
+    card-number:    x=0.375, y=0.370, w=0.250, h=0.046
+    cvv:            x=0.375, y=0.482, w=0.125, h=0.046
+    name-on-card:   x=0.375, y=0.556, w=0.250, h=0.046
+    canvas-box:     x=0.375, y=0.638, w=0.250, h=0.065
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=1920">
+  <title>VDLM Demo — Checkout</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 1920px; height: 1080px; overflow: hidden;
+      background: #f0f2f5; font-family: Arial, sans-serif; font-size: 16px;
+    }
+
+    nav {
+      position: absolute; top: 0; left: 0; width: 1920px; height: 60px;
+      background: #1a73e8; display: flex; align-items: center; padding: 0 40px;
+    }
+    nav .logo { color: #fff; font-size: 22px; font-weight: 700; }
+    nav .search {
+      position: absolute; left: 760px; top: 12px; width: 400px;
+    }
+    nav .search input[type="search"] {
+      width: 100%; height: 36px; padding: 0 12px; border-radius: 18px;
+      border: none; font-size: 14px; outline: none;
+    }
+
+    /* Order summary (left panel) */
+    .summary-panel {
+      position: absolute; left: 240px; top: 100px;
+      width: 400px; height: 500px;
+      background: #fff; border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.12);
+      padding: 32px;
+    }
+    .summary-panel h2 { font-size: 20px; color: #202124; margin-bottom: 20px; }
+    .order-item { display: flex; justify-content: space-between; margin-bottom: 16px; font-size: 15px; color: #3c4043; }
+    .order-total { border-top: 1px solid #e0e0e0; padding-top: 16px; display: flex; justify-content: space-between; font-weight: 700; }
+
+    /* Payment card (right panel) */
+    .card {
+      position: absolute;
+      left: 720px; top: 100px;
+      width: 480px; height: 540px;
+      background: #fff; border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+      padding: 40px 48px;
+    }
+    .card h1 { font-size: 22px; color: #202124; margin-bottom: 24px; }
+
+    .field { margin-bottom: 20px; }
+    .field label { display: block; font-size: 14px; color: #5f6368; margin-bottom: 6px; }
+    .field input {
+      display: block; width: 384px; height: 50px;
+      padding: 0 12px; border: 1px solid #dadce0;
+      border-radius: 4px; font-size: 16px; outline: none;
+    }
+    .field.half input { width: 180px; }
+    .field input:focus { border-color: #1a73e8; box-shadow: 0 0 0 2px rgba(26,115,232,0.2); }
+    .field-row { display: flex; gap: 24px; }
+
+    /* Canvas-rendered sensitive box */
+    .sensitive-canvas-wrapper {
+      position: absolute;
+      left: 768px; top: 690px;
+      width: 384px; height: 70px;
+    }
+    canvas#checkout-sensitive-box {
+      width: 384px; height: 70px;
+      border: 2px dashed #e53935;
+      border-radius: 4px;
+    }
+
+    .btn-row {
+      position: absolute; left: 768px; top: 784px;
+      display: flex; gap: 16px;
+    }
+    button {
+      height: 44px; padding: 0 28px;
+      border-radius: 4px; border: none;
+      font-size: 15px; font-weight: 600; cursor: pointer;
+    }
+    .btn-pay { background: #34a853; color: #fff; }
+    .btn-cancel { background: #fff; color: #5f6368; border: 1px solid #dadce0; }
+  </style>
+</head>
+<body>
+
+<nav>
+  <span class="logo">VDLM Demo</span>
+  <div class="search">
+    <input type="search" id="nav-search" placeholder="Search…" autocomplete="off">
+  </div>
+</nav>
+
+<!-- Order summary -->
+<div class="summary-panel">
+  <h2>Order Summary</h2>
+  <div class="order-item"><span>VDLM Privacy License</span><span>$299.00</span></div>
+  <div class="order-item"><span>Support Plan (1yr)</span><span>$49.00</span></div>
+  <div class="order-item"><span>Tax (10%)</span><span>$34.80</span></div>
+  <div class="order-total"><span>Total</span><span>$382.80</span></div>
+</div>
+
+<!-- Payment form -->
+<div class="card">
+  <h1>Payment Details</h1>
+
+  <div class="field">
+    <label for="card-number">Card Number</label>
+    <input
+      type="text"
+      id="card-number"
+      name="card-number"
+      autocomplete="cc-number"
+      placeholder="1234 5678 9012 3456"
+      maxlength="19"
+      inputmode="numeric"
+    >
+  </div>
+
+  <div class="field-row">
+    <div class="field half">
+      <label for="expiry">Expiry (MM/YY)</label>
+      <input
+        type="text"
+        id="expiry"
+        name="expiry"
+        autocomplete="cc-exp"
+        placeholder="MM/YY"
+        maxlength="5"
+      >
+    </div>
+    <div class="field half">
+      <label for="cvv">CVV</label>
+      <input
+        type="password"
+        id="cvv"
+        name="cvv"
+        autocomplete="cc-csc"
+        placeholder="•••"
+        maxlength="4"
+        inputmode="numeric"
+      >
+    </div>
+  </div>
+
+  <div class="field">
+    <label for="name-on-card">Name on Card</label>
+    <input
+      type="text"
+      id="name-on-card"
+      name="name"
+      autocomplete="cc-name"
+      placeholder="Full name as on card"
+    >
+  </div>
+</div>
+
+<!-- Canvas-rendered sensitive region -->
+<div class="sensitive-canvas-wrapper" data-vdlm-sensitive="true" data-category="payment">
+  <canvas id="checkout-sensitive-box" width="384" height="70"></canvas>
+</div>
+
+<div class="btn-row">
+  <button id="btn-pay" class="btn-pay">Pay $382.80</button>
+  <button id="btn-cancel" class="btn-cancel">Cancel</button>
+</div>
+
+<script>
+  // Draw deterministic card-art in the canvas sensitive box
+  (function() {
+    const canvas = document.getElementById('checkout-sensitive-box');
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff3f3';
+    ctx.fillRect(0, 0, 384, 70);
+    ctx.fillStyle = '#e53935';
+    ctx.font = 'bold 13px Arial';
+    ctx.fillText('Sensitive Payment Region', 10, 22);
+    ctx.fillStyle = '#5f6368';
+    ctx.font = '12px Arial';
+    ctx.fillText('Card data encrypted in transit', 10, 42);
+    // Draw a deterministic "card chip" icon
+    ctx.fillStyle = '#ffd600';
+    ctx.fillRect(290, 10, 40, 30);
+    ctx.strokeStyle = '#ccc';
+    ctx.strokeRect(290, 10, 40, 30);
+    ctx.fillStyle = '#e53935';
+    ctx.fillRect(304, 10, 12, 30);
+    ctx.fillStyle = '#e53935';
+    ctx.fillRect(290, 20, 40, 10);
+  })();
+
+  document.getElementById('btn-pay').addEventListener('click', function() {
+    this.textContent = 'Processing…';
+    setTimeout(() => { this.textContent = 'Pay $382.80'; }, 1500);
+  });
+</script>
+</body>
+</html>

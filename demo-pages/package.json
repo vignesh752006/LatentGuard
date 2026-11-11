@@ -1,0 +1,12 @@
+{
+  "name": "vdlm-demo-pages",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "assert-isens": "node scripts/assert-isens.mjs"
+  },
+  "dependencies": {
+    "jsdom": "^25.0.1"
+  }
+}
