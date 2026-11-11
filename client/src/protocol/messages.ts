@@ -22,7 +22,7 @@ export interface EncoderSpec {
   model_id: string;
   patch_count: number;
   embedding_dim: number;
-  dtype: "float16" | "float32";
+  dtype: "float16" | "float32" | "int8_quantized";
 }
 
 export interface Viewport {
@@ -43,7 +43,7 @@ export interface SpatialMetadata {
 
 export interface TensorPayload {
   encoding: "base64";
-  dtype: "float16" | "float32";
+  dtype: "float16" | "float32" | "int8_quantized";
   shape: [number, number];
   data: string;
   compression: "none" | "zlib" | "delta";

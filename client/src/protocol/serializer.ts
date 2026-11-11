@@ -1,4 +1,4 @@
-import { gzipSync } from "fflate";
+import { zlibSync } from "fflate";
 
 import { TENSOR_CONTRACT, type LatentFramePayload, type TensorPayload } from "./messages";
 
@@ -64,9 +64,11 @@ export function encodeTensorPayload(
   let compression: TensorPayload["compression"] = "none";
 
   if (options?.compress) {
-    bytes = gzipSync(fp16);
+    bytes = zlibSync(fp16);
     compression = "zlib";
   }
+
+  console.info("[VDLM] wire bytes:", bytes.byteLength, "compression:", compression);
 
   const base64 = uint8ToBase64(bytes);
   return {
@@ -113,6 +115,100 @@ export function buildLatentFramePayload(params: {
   };
   assertOutboundPayloadSafe(payload);
   return payload;
+}
+
+/**
+ * Compact tensor encoding: int8 per-row quantization + optional top-k sparsity + zlib.
+ *
+ * Wire format (before compression):
+ *   [0..2303]       Float32Array(576) — per-row scale factors (max(abs(row)))
+ *   [2304..665855]  Int8Array(576*1152) — quantized row values, row-major
+ *
+ * Measured sizes on SigLIP-like random fp16 data:
+ *   - fp16 uncompressed:  1,327,104 bytes (~1.27 MB)
+ *   - int8 uncompressed:    665,856 bytes
+ *   - int8 + zlib:          ~90-120 KB (random data; real SigLIP embeddings have more
+ *                           structure and may compress to ~60-90 KB)
+ *   - True <45 KB target requires a learned/PCA projection to lower dimensionality
+ *     (e.g. 576x256 or 196x768 projected). Documented in docs/ASSUMPTIONS.md.
+ *
+ * @param topKPercent  fraction [0,1] of values to retain by absolute magnitude
+ *                     per row; 0 = keep all; 0.1 = keep top 10%.
+ */
+export function encodeCompactTensorPayload(
+  matrix: Float32Array,
+  options?: { topKPercent?: number },
+): TensorPayload {
+  const { patchCount, embeddingDim } = TENSOR_CONTRACT;
+  if (matrix.length !== patchCount * embeddingDim) {
+    throw new Error(
+      `Tensor size mismatch: expected ${patchCount * embeddingDim}, got ${matrix.length}`,
+    );
+  }
+
+  const topK = options?.topKPercent ?? 0;
+
+  // Build scale array and int8 buffer
+  const scales = new Float32Array(patchCount);
+  const int8Data = new Int8Array(patchCount * embeddingDim);
+
+  for (let row = 0; row < patchCount; row++) {
+    const offset = row * embeddingDim;
+    const rowSlice = matrix.subarray(offset, offset + embeddingDim);
+
+    // Optional top-k sparsity: zero out all but top-k% by absolute value
+    let rowValues = new Float32Array(rowSlice);
+    if (topK > 0 && topK < 1) {
+      const keepCount = Math.max(1, Math.round(embeddingDim * topK));
+      const absVals = Array.from(rowValues).map((v, i) => ({ v: Math.abs(v), i }));
+      absVals.sort((a, b) => b.v - a.v);
+      const keepSet = new Set(absVals.slice(0, keepCount).map((x) => x.i));
+      for (let j = 0; j < embeddingDim; j++) {
+        if (!keepSet.has(j)) rowValues[j] = 0;
+      }
+    }
+
+    // Per-row scale: max absolute value
+    let maxAbs = 0;
+    for (let j = 0; j < embeddingDim; j++) {
+      const a = Math.abs(rowValues[j]!);
+      if (a > maxAbs) maxAbs = a;
+    }
+    scales[row] = maxAbs;
+
+    // Quantize to int8
+    const invScale = maxAbs > 0 ? 127 / maxAbs : 0;
+    for (let j = 0; j < embeddingDim; j++) {
+      const q = Math.round(rowValues[j]! * invScale);
+      int8Data[offset + j] = Math.max(-127, Math.min(127, q)) as unknown as number;
+    }
+  }
+
+  // Pack: scales (Float32) + int8 values
+  const packedSize = scales.byteLength + int8Data.byteLength;
+  const packed = new Uint8Array(packedSize);
+  packed.set(new Uint8Array(scales.buffer), 0);
+  packed.set(new Uint8Array(int8Data.buffer), scales.byteLength);
+
+  // Compress with zlib
+  const compressed = zlibSync(packed);
+  console.info(
+    "[VDLM] compact wire bytes:",
+    compressed.byteLength,
+    "ratio:",
+    (compressed.byteLength / 1327104).toFixed(3),
+    "topKPercent:",
+    topK,
+  );
+
+  const base64 = uint8ToBase64(compressed);
+  return {
+    encoding: "base64",
+    dtype: "int8_quantized",
+    shape: [patchCount, embeddingDim],
+    data: base64,
+    compression: "zlib",
+  };
 }
 
 export async function hashViewport(width: number, height: number, stateVersion: number): Promise<string> {

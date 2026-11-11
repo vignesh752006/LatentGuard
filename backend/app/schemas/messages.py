@@ -17,7 +17,7 @@ class EncoderSpec(BaseModel):
     model_id: str = "siglip-base-patch16-224"
     patch_count: int = 576
     embedding_dim: int = 1152
-    dtype: Literal["float16", "float32"] = "float16"
+    dtype: Literal["float16", "float32", "int8_quantized"] = "float16"
 
 
 class Viewport(BaseModel):
@@ -52,7 +52,7 @@ class SanitizationProvenance(BaseModel):
 
 class TensorPayload(BaseModel):
     encoding: Literal["base64"] = "base64"
-    dtype: Literal["float16", "float32"] = "float16"
+    dtype: Literal["float16", "float32", "int8_quantized"] = "float16"
     shape: list[int]
     data: str
     compression: Literal["none", "zlib", "delta"] = "none"
