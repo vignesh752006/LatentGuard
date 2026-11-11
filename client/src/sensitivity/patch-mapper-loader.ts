@@ -106,3 +106,4 @@ function _makeTsMapper(): PatchMapper {
     patchToNormalizedCoords: patchToNormalizedCoordsTs,
   };
 }
+

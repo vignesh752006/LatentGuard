@@ -26,6 +26,43 @@ type VisionEncoderLike = {
 
 const persistStatus = persistStatusFromOffscreen;
 
+export interface StageTiming {
+  stage: string;
+  durationMs: number;
+}
+
+export interface FrameTiming {
+  frameId: string;
+  totalMs: number;
+  stages: StageTiming[];
+}
+
+/** Rolling buffer of the last 100 frame timings (for p50/p95 reporting). */
+const _framingHistory: FrameTiming[] = [];
+
+export function getFrameTimings(): readonly FrameTiming[] {
+  return _framingHistory;
+}
+
+export function computeLatencyPercentiles(key: "totalMs" | string): {
+  p50: number;
+  p95: number;
+  count: number;
+} {
+  const values = _framingHistory
+    .map((f) => {
+      if (key === "totalMs") return f.totalMs;
+      return f.stages.find((s) => s.stage === key)?.durationMs ?? NaN;
+    })
+    .filter((v) => !isNaN(v))
+    .sort((a, b) => a - b);
+
+  if (values.length === 0) return { p50: 0, p95: 0, count: 0 };
+  const p50 = values[Math.floor(values.length * 0.5)]!;
+  const p95 = values[Math.floor(values.length * 0.95)]!;
+  return { p50, p95, count: values.length };
+}
+
 export class OffscreenAgentRunner {
   private ws: WebSocket | null = null;
   private sessionId: string | null = null;
@@ -160,26 +197,45 @@ export class OffscreenAgentRunner {
   private async runCycle(): Promise<void> {
     if (!this.running || this.tabId === null || !this.config || !this.sessionId) return;
 
+    const cycleStart = performance.now();
+    const stages: StageTiming[] = [];
+    const mark = (stage: string, start: number) => {
+      stages.push({ stage, durationMs: performance.now() - start });
+    };
+
     try {
+      let t = performance.now();
       await this.setStage("scanning");
       const sensitivity = await this.relayTab<SensitivityScanResult>({ type: "SCAN_SENSITIVITY" });
       const stateVersion = await this.relayTab<{ stateVersion: number }>({ type: "GET_STATE_VERSION" });
+      mark("scan", t);
 
+      t = performance.now();
       await this.setStage("capturing");
       const captureJpeg = await this.requestCapture();
+      mark("capture", t);
 
       this.frameCount += 1;
       const frameId = `f-${String(this.frameCount).padStart(5, "0")}`;
 
+      t = performance.now();
       await this.setStage("processing");
       const imageData = await decodeCaptureToImageData(captureJpeg);
+      mark("decode", t);
+
+      t = performance.now();
       const embeddings = await this.visionEncoder!.encode(imageData);
+      mark("encode", t);
+
+      t = performance.now();
       const sanitized = await this.sanitizer!.sanitize(
         embeddings,
         sensitivity.sensitivePatchIndices,
       );
       embeddings.fill(0);
+      mark("sanitize", t);
 
+      t = performance.now();
       const viewportHash = await hashViewport(
         sensitivity.viewport.width,
         sensitivity.viewport.height,
@@ -196,12 +252,21 @@ export class OffscreenAgentRunner {
         compress: this.config.compressPayload,
       });
       sanitized.fill(0);
+      mark("serialize", t);
 
+      t = performance.now();
       await this.setStage("transmitting");
       this.ws!.send(serializeLatentFrame(latentFrame, this.sessionId));
+      mark("network_send", t);
 
       await this.setStage("awaiting_action");
       await persistStatus({ frameCount: this.frameCount, lastError: null });
+
+      const totalMs = performance.now() - cycleStart;
+      const timing: FrameTiming = { frameId, totalMs, stages };
+      _framingHistory.push(timing);
+      if (_framingHistory.length > 100) _framingHistory.shift();
+      log("debug", "[VDLM] frame timing", { frameId, totalMs: totalMs.toFixed(1), stages });
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       log("error", "Cycle failed", { error: msg });

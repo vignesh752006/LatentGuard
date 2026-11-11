@@ -117,3 +117,4 @@ function l2Normalize(v: Float32Array): Float32Array {
   for (let i = 0; i < v.length; i++) out[i] = v[i]! / norm;
   return out;
 }
+

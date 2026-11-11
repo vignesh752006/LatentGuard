@@ -76,3 +76,4 @@ def _remove_trailing_commas(raw: str) -> dict | None:
     # Remove trailing commas before } or ]
     cleaned = re.sub(r",\s*([}\]])", r"\1", raw)
     return _extract_braces(cleaned)
+

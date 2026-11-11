@@ -110,3 +110,4 @@ describe("buildScoreGrid", () => {
     expect(diffCount).toBeGreaterThan(0);
   });
 });
+
