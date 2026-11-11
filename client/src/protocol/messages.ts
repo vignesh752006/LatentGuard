@@ -62,6 +62,12 @@ export interface ActionContext {
   pending_user_input: boolean;
 }
 
+export interface ScoreGrid {
+  /** Flattened 24×24 cosine-similarity scores between V' and task-intent text embedding. */
+  data: string; // base64-encoded Float32Array (576 × 4 bytes)
+  shape: [24, 24];
+}
+
 export interface LatentFramePayload {
   frame_id: string;
   state_version: number;
@@ -69,6 +75,8 @@ export interface LatentFramePayload {
   spatial_metadata: SpatialMetadata;
   action_context: ActionContext;
   provenance: SanitizationProvenance;
+  /** Optional Task 6: per-patch text-image similarity scores (24×24). */
+  score_grid?: ScoreGrid | null;
 }
 
 export interface SessionInitPayload {

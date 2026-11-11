@@ -1,6 +1,11 @@
 import { zlibSync } from "fflate";
 
-import { TENSOR_CONTRACT, type LatentFramePayload, type TensorPayload } from "./messages";
+import {
+  TENSOR_CONTRACT,
+  type LatentFramePayload,
+  type ScoreGrid,
+  type TensorPayload,
+} from "./messages";
 
 const FORBIDDEN_KEYS =
   /screenshot|raw_pixels?|image_data|dom_html|password|credential|payment/i;
@@ -88,7 +93,17 @@ export function buildLatentFramePayload(params: {
   viewportHash: string;
   lastActionId: string | null;
   compress?: boolean;
+  /** Optional Task 6: per-patch text-image similarity scores (Float32Array of length 576). */
+  scoreGrid?: Float32Array | null;
 }): LatentFramePayload {
+  let scoreGridField: ScoreGrid | undefined;
+  if (params.scoreGrid && params.scoreGrid.length === TENSOR_CONTRACT.patchCount) {
+    scoreGridField = {
+      data: uint8ToBase64(new Uint8Array(params.scoreGrid.buffer)),
+      shape: [24, 24],
+    };
+  }
+
   const payload: LatentFramePayload = {
     frame_id: params.frameId,
     state_version: params.stateVersion,
@@ -112,6 +127,7 @@ export function buildLatentFramePayload(params: {
       sanitization_method: "null_space_projection",
       attestation: null,
     },
+    ...(scoreGridField ? { score_grid: scoreGridField } : {}),
   };
   assertOutboundPayloadSafe(payload);
   return payload;

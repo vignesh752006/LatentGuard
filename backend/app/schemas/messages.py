@@ -66,6 +66,20 @@ class TensorPayload(BaseModel):
         return value
 
 
+class ScoreGrid(BaseModel):
+    """Task 6: per-patch text-image similarity score grid (24×24, flattened)."""
+
+    data: str  # base64-encoded Float32Array, 576 × 4 bytes = 2304 bytes
+    shape: list[int] = Field(default_factory=lambda: [24, 24])
+
+    @field_validator("shape")
+    @classmethod
+    def shape_must_be_24x24(cls, value: list[int]) -> list[int]:
+        if value != [24, 24]:
+            raise ValueError("score_grid shape must be [24, 24]")
+        return value
+
+
 class LatentFramePayload(BaseModel):
     frame_id: str
     state_version: int = Field(ge=0)
@@ -73,6 +87,7 @@ class LatentFramePayload(BaseModel):
     spatial_metadata: SpatialMetadata
     action_context: ActionContext = Field(default_factory=ActionContext)
     provenance: SanitizationProvenance = Field(default_factory=SanitizationProvenance)
+    score_grid: ScoreGrid | None = None  # Task 6: optional per-patch score grid
 
 
 class SessionInitPayload(BaseModel):
