@@ -1,0 +1,173 @@
+{
+  "setup": {
+    "pages": 500,
+    "train_pages": 400,
+    "held_out_pages": 100,
+    "split_by_page": true,
+    "pca_rank": 64,
+    "sanitizer_implementation": "Mean-direction rank-1 baseline; NumPy Gram-matrix eigendecomposition for k=1/4/8; client SVD uses power iteration with deflation",
+    "wire_format": "source SVD/null-space -> centered PCA -> per-row int8 -> zlib/base64 JSON -> backend decode/rebuild",
+    "decoder": "1x1 Conv2d 1152->64; transposed-convolution upsampling; no flattened MLP",
+    "device": "cpu",
+    "easyocr": true,
+    "easyocr_version": "1.7.2",
+    "easyocr_original_screenshot_control": {
+      "held_out_pages": 100,
+      "password_character_accuracy": 0.0,
+      "card_character_accuracy": 0.0025
+    },
+    "seed": 26171,
+    "decoder_seed": 26171,
+    "python_version": "3.12.10",
+    "numpy_version": "2.5.3",
+    "pytorch_version": "2.14.0+cpu",
+    "pillow_version": "13.0.0",
+    "onnxruntime_version": "1.31.1",
+    "model_bytes": 343344204,
+    "psnr": "Sensitive-pixel PSNR with RGB values in [0,1] and data range 1.0",
+    "ssim": "11x11 average-pool SSIM, C1=0.01^2, C2=0.03^2, averaged over sensitive pixels",
+    "digit_probe": "Ridge regression on global-mean latent features, lambda=1.0; 10% uniform character chance"
+  },
+  "results": {
+    "V": {
+      "decoder_epochs": 2,
+      "psnr_sensitive_mean_db": 25.249133116531485,
+      "ssim_sensitive_mean": 0.7213405722379684,
+      "easyocr_password_character_accuracy": 0.0,
+      "easyocr_card_character_accuracy": 0.0,
+      "direct_card_digit_attack": {
+        "character_accuracy": 0.125,
+        "uniform_chance": 0.1,
+        "training_majority_baseline": 0.09875,
+        "test_pages": 100
+      },
+      "test_pages": 100
+    },
+    "Vprime_none": {
+      "decoder_epochs": 2,
+      "psnr_sensitive_mean_db": 25.237394933307783,
+      "ssim_sensitive_mean": 0.7146068716049194,
+      "easyocr_password_character_accuracy": 0.0,
+      "easyocr_card_character_accuracy": 0.0,
+      "direct_card_digit_attack": {
+        "character_accuracy": 0.110625,
+        "uniform_chance": 0.1,
+        "training_majority_baseline": 0.09875,
+        "test_pages": 100
+      },
+      "test_pages": 100
+    },
+    "Vprime_rank1_alpha0": {
+      "decoder_epochs": 2,
+      "psnr_sensitive_mean_db": 25.442362038001455,
+      "ssim_sensitive_mean": 0.7209130471944809,
+      "easyocr_password_character_accuracy": 0.0,
+      "easyocr_card_character_accuracy": 0.0,
+      "direct_card_digit_attack": {
+        "character_accuracy": 0.12,
+        "uniform_chance": 0.1,
+        "training_majority_baseline": 0.09875,
+        "test_pages": 100
+      },
+      "test_pages": 100
+    },
+    "Vprime_rank1_alpha001": {
+      "decoder_epochs": 2,
+      "psnr_sensitive_mean_db": 25.418115000058755,
+      "ssim_sensitive_mean": 0.7218373113870621,
+      "easyocr_password_character_accuracy": 0.0,
+      "easyocr_card_character_accuracy": 0.0,
+      "direct_card_digit_attack": {
+        "character_accuracy": 0.118125,
+        "uniform_chance": 0.1,
+        "training_majority_baseline": 0.09875,
+        "test_pages": 100
+      },
+      "test_pages": 100
+    },
+    "Vprime_svd_k1_alpha0": {
+      "decoder_epochs": 2,
+      "psnr_sensitive_mean_db": 25.310894309820824,
+      "ssim_sensitive_mean": 0.7207760274410248,
+      "easyocr_password_character_accuracy": 0.0,
+      "easyocr_card_character_accuracy": 0.0,
+      "direct_card_digit_attack": {
+        "character_accuracy": 0.113125,
+        "uniform_chance": 0.1,
+        "training_majority_baseline": 0.09875,
+        "test_pages": 100
+      },
+      "test_pages": 100
+    },
+    "Vprime_svd_k1_alpha001": {
+      "decoder_epochs": 2,
+      "psnr_sensitive_mean_db": 25.280291293159625,
+      "ssim_sensitive_mean": 0.7202815920114517,
+      "easyocr_password_character_accuracy": 0.0,
+      "easyocr_card_character_accuracy": 0.0,
+      "direct_card_digit_attack": {
+        "character_accuracy": 0.110625,
+        "uniform_chance": 0.1,
+        "training_majority_baseline": 0.09875,
+        "test_pages": 100
+      },
+      "test_pages": 100
+    },
+    "Vprime_svd_k4_alpha0": {
+      "decoder_epochs": 2,
+      "psnr_sensitive_mean_db": 25.31854917162678,
+      "ssim_sensitive_mean": 0.7163942992687226,
+      "easyocr_password_character_accuracy": 0.0,
+      "easyocr_card_character_accuracy": 0.0,
+      "direct_card_digit_attack": {
+        "character_accuracy": 0.1075,
+        "uniform_chance": 0.1,
+        "training_majority_baseline": 0.09875,
+        "test_pages": 100
+      },
+      "test_pages": 100
+    },
+    "Vprime_svd_k4_alpha001": {
+      "decoder_epochs": 2,
+      "psnr_sensitive_mean_db": 25.330817928230875,
+      "ssim_sensitive_mean": 0.7171533989906311,
+      "easyocr_password_character_accuracy": 0.0,
+      "easyocr_card_character_accuracy": 0.0,
+      "direct_card_digit_attack": {
+        "character_accuracy": 0.109375,
+        "uniform_chance": 0.1,
+        "training_majority_baseline": 0.09875,
+        "test_pages": 100
+      },
+      "test_pages": 100
+    },
+    "Vprime_svd_k8_alpha0": {
+      "decoder_epochs": 2,
+      "psnr_sensitive_mean_db": 25.183331530077126,
+      "ssim_sensitive_mean": 0.7123363345861435,
+      "easyocr_password_character_accuracy": 0.0,
+      "easyocr_card_character_accuracy": 0.0,
+      "direct_card_digit_attack": {
+        "character_accuracy": 0.11,
+        "uniform_chance": 0.1,
+        "training_majority_baseline": 0.09875,
+        "test_pages": 100
+      },
+      "test_pages": 100
+    },
+    "Vprime_svd_k8_alpha001": {
+      "decoder_epochs": 2,
+      "psnr_sensitive_mean_db": 25.21086719337367,
+      "ssim_sensitive_mean": 0.7132500267028808,
+      "easyocr_password_character_accuracy": 0.0,
+      "easyocr_card_character_accuracy": 0.0,
+      "direct_card_digit_attack": {
+        "character_accuracy": 0.1125,
+        "uniform_chance": 0.1,
+        "training_majority_baseline": 0.09875,
+        "test_pages": 100
+      },
+      "test_pages": 100
+    }
+  }
+}

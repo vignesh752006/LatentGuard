@@ -8,7 +8,7 @@ This document separates **research objectives** described in the master blueprin
 |--------------------|--------|
 | Mathematically proven zero-knowledge privacy | **Not implemented.** No ZKP layer yet; see `provenance` extension fields. |
 | 100% spatial layout preservation after null-space projection | **Not verified.** Requires client-side VDLM shader + benchmark suite. |
-| Non-invertibility of `V'` against feature inversion decoders | **Not measured.** The Task 5 smoke test below verifies pipeline execution only; full decoder, OCR, and digit-probe results are pending. |
+| Non-invertibility of `V'` against feature inversion decoders | **Not established.** See the measured but limited Task 5 benchmark below; no privacy guarantee follows from it. |
 | `>92%` action accuracy parity vs. unredacted baseline | **Not measured.** Evaluation harness is future work. |
 
 ## Verified by this backend
@@ -121,40 +121,51 @@ fidelity tradeoff: held-out mean patch cosine was `0.759635` at rank 64 and
 `0.842008` at rank 128. It is not evidence of action-accuracy parity or
 resistance to inversion.
 
-### Task 5 — Inversion benchmark status
+### Task 5 — Inversion benchmark measurements
 
-The 10-page CI smoke test passed with a fixed seed, real SigLIP ONNX
-embeddings, an 8/2 page-level train/validation split, and two decoder epochs.
-It trained the unmodified `V` and `Vprime_svd_k4_alpha001` decoder paths.
-EasyOCR was explicitly skipped. This proves the selected pipeline paths run.
+The 10-page CI smoke test passed with real SigLIP ONNX embeddings, an 8/2
+page-level split, and two decoder epochs. It exercised the `V` and
+`Vprime_svd_k4_alpha001` decoder paths; EasyOCR was skipped in that smoke test.
 
-The full dataset now contains 500 Playwright-rendered pages, split by page into
-400 training and 100 held-out pages. It used the real FP32 SigLIP ONNX model
-(343,344,204 bytes), the rank-64 source-PCA wire form, per-row int8, zlib, and
-the backend decoder to rebuild `[576,1152]`. A ridge digit probe was run on
-global-mean latent features, with 100 held-out pages (1,600 digit characters),
-lambda `1.0`, and a uniform-character chance baseline of `0.100`:
+The full run used 500 synthetic Playwright pages (400 training / 100 held out),
+the 343,344,204-byte FP32 SigLIP model, and the exact rank-64 source-PCA
+wire path: source sanitization, PCA, per-row int8, zlib/Base64 JSON, and
+backend reconstruction to `[576,1152]`. Ten convolutional decoder variants
+were trained for two epochs each. Held-out sensitive-region PSNR ranged from
+25.183 to 25.442 dB and SSIM from 0.7123 to 0.7218.
+
+The direct ridge digit probe used global-mean latent features and predicted
+1,600 held-out card-number characters. Uniform-character chance was 0.100;
+the training-majority baseline was 0.09875:
 
 | Representation | Held-out digit character accuracy |
 |---|---:|
-| V (unsanitized) | 0.125000 |
-| None sanitizer / PCA+wire only | 0.110625 |
-| Rank-1 baseline, alpha 0 | 0.120000 |
-| Rank-1 baseline, alpha 0.01 | 0.118125 |
-| SVD k=1, alpha 0 | 0.113125 |
-| SVD k=1, alpha 0.01 | 0.110625 |
-| SVD k=4, alpha 0 | 0.107500 |
-| SVD k=4, alpha 0.01 | 0.109375 |
-| SVD k=8, alpha 0 | 0.110000 |
-| SVD k=8, alpha 0.01 | 0.112500 |
+| V (unsanitized) | 0.12500 |
+| None sanitizer / PCA+wire only | 0.11063 |
+| Rank-1 baseline, alpha 0 | 0.12000 |
+| Rank-1 baseline, alpha 0.01 | 0.11813 |
+| SVD k=1, alpha 0 | 0.11313 |
+| SVD k=1, alpha 0.01 | 0.11063 |
+| SVD k=4, alpha 0 | 0.10750 |
+| SVD k=4, alpha 0.01 | 0.10938 |
+| SVD k=8, alpha 0 | 0.11000 |
+| SVD k=8, alpha 0.01 | 0.11250 |
 
-The held-out training-majority baseline was `0.098750`; uniform chance was
-`0.100`. These values are from one simple global-mean ridge probe, not a
-trained convolutional decoder or a statistical privacy test. The full-split
-`V` and configured `Vprime_svd_k4_alpha001` decoder runs are in progress.
-Held-out PSNR, SSIM, EasyOCR accuracy, and the remaining per-sanitizer decoder
-results are not yet measured. There is not yet a conclusion about whether
-`V'` remains invertible.
+EasyOCR 1.7.2 reported zero password and card character accuracy on all ten
+reconstructed representations. As a control, on the original 100 held-out
+screenshots it scored 0.000 password and 0.0025 card character accuracy. The
+OCR result therefore does not measure sanitizer benefit. The digit probe
+results are modestly above chance for some settings and below the unsanitized
+`V` result, but are only one simple attack.
+
+The benchmark does not establish that `V'` is non-invertible: the decoders
+produced sensitive-region image reconstructions with the PSNR/SSIM values
+above, and no stronger decoder or attack was evaluated. Conversely, these
+metrics do not prove that the original credentials were recovered. This
+synthetic-only, two-epoch evaluation supports no privacy guarantee. Full
+per-variant metrics, charts, setup, and limitations are in
+[`EVAL_INVERSION.md`](./EVAL_INVERSION.md); machine-readable results are in
+[`eval_inversion_results.json`](./eval_inversion_results.json).
 
 The SVD integration test ran on a real login screenshot through the browser
 SigLIP encoder and adapted `[576,1152]` embeddings with `k=4`, `alpha=0`, and
