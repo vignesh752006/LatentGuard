@@ -33,10 +33,16 @@ siglip-eval = [
     "onnxruntime>=1.20",
     "huggingface-hub>=0.26",
 ]
+inversion-eval = [
+    "easyocr>=1.7.2",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*", "eval*"]
+
+[tool.setuptools.package-data]
+"app.encoding" = ["data/*.bin"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

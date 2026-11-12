@@ -99,13 +99,28 @@ vision model, then run:
 python backend/eval/siglip/fit_source_pca.py
 ```
 
-The deterministic fitter renders 128 varied UI-page screenshots, runs each
-through the real `google/siglip-base-patch16-224` FP32 ONNX vision tower, and
-fits a centered PCA basis over the resulting 25,088 patch embeddings. It saves
-the mean plus 128 components as `client/public/pca/source-pca-v1.bin`; metadata
-records the seed, software versions, page count, and held-out reference
-fidelity. The rendered training pages are synthetic; their embeddings are
-model outputs, not fabricated vectors. No page screenshots are retained.
+The backend decoder loads the canonical basis from
+`backend/app/encoding/data/source-pca-v1.bin`. The browser distribution carries
+an identical copy at `client/public/pca/source-pca-v1.bin`.
+
+Capture at least 20 real public pages and render 280 controlled form pages:
+
+```powershell
+cd client
+node scripts/capture-public-pca-pages.mjs
+node scripts/render-inversion-pages.mjs --out-dir ..\backend\eval\siglip\fixtures\pca-pages --count 280 --seed 156017
+cd ..
+python backend/eval/siglip/fit_source_pca.py
+```
+
+The fitter refuses fewer than 300 total pages or 20 public captures. It splits
+by page (80% fit / 20% held out), fits only on training-page embeddings, and
+reports payload JSON byte size and patch cosine for ranks 64 and 128 with
+`alpha=0` and the configured `alpha=0.01`. It serializes and decodes each
+held-out sample through the backend tensor decoder before measuring fidelity.
+The public-page screenshots and synthetic page screenshots are generated
+inputs, ignored by Git, and are not shipped with the basis. URLs and software
+versions are recorded in the metadata.
 
 The default compact payload uses the first 64 PCA components, per-row int8
 quantization and zlib. The client applies the configured SVD or rank-1

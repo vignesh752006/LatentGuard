@@ -26,7 +26,7 @@ export const DEFAULT_CONFIG: ClientConfig = {
   sanitizerMode: "svd",
   sanitizerK: 4,
   sanitizerAlpha: 0.01,
-  payloadMode: "standard",
+  payloadMode: "source-pca",
   frameIntervalMs: 1500,
   compressPayload: false,
 };

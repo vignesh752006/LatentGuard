@@ -8,6 +8,7 @@ describe("default client configuration", () => {
     expect(DEFAULT_CONFIG.sanitizerMode).toBe("svd");
     expect(DEFAULT_CONFIG.sanitizerK).toBe(4);
     expect(DEFAULT_CONFIG.sanitizerAlpha).toBe(0.01);
+    expect(DEFAULT_CONFIG.payloadMode).toBe("source-pca");
     expect(DEFAULT_CONFIG.onnxModelUrl).toContain("vision-fp16.onnx");
   });
 });

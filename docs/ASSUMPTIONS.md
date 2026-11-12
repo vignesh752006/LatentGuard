@@ -8,7 +8,7 @@ This document separates **research objectives** described in the master blueprin
 |--------------------|--------|
 | Mathematically proven zero-knowledge privacy | **Not implemented.** No ZKP layer yet; see `provenance` extension fields. |
 | 100% spatial layout preservation after null-space projection | **Not verified.** Requires client-side VDLM shader + benchmark suite. |
-| Non-invertibility of `V'` against feature inversion decoders | **Not verified.** Phase 3 penetration testing is future work. |
+| Non-invertibility of `V'` against feature inversion decoders | **Not measured.** The Task 5 smoke test below verifies pipeline execution only; full decoder, OCR, and digit-probe results are pending. |
 | `>92%` action accuracy parity vs. unredacted baseline | **Not measured.** Evaluation harness is future work. |
 
 ## Verified by this backend
@@ -84,38 +84,53 @@ against its reconstruction through the transposed orthonormal basis. The
 per-image measurements and exact procedure are reproducible with
 `backend/eval/siglip/measure_payloads.py`.
 
-### Source-PCA integration and measured compact wire
+### Source-PCA held-out payload and fidelity
 
-The source-PCA basis was fit from real `google/siglip-base-patch16-224`
-FP32-ONNX outputs on 128 seeded, varied rendered UI screenshots (25,088
-source patch vectors; seed `0x26171`). Pages are synthetic UI compositions;
-their SigLIP embeddings are actual model outputs. The shipped centered PCA
-basis has rank 128 and occupies 396,288 bytes. The browser uses its first 64
-components. Training and validation details, software versions, and the
-per-fixture results are in
-`backend/eval/siglip/fixtures/source-pca-metadata.json`.
+The canonical rank-128 basis was refit using real SigLIP FP32-ONNX outputs from
+303 Playwright screenshots: 280 controlled synthetic form pages and 23 public
+website pages. Pages, not tokens, were split deterministically: 242 training
+pages and 61 held-out pages. PCA was fit only to training-page vectors. The
+held-out measurements serialize coefficients as the source-PCA tensor JSON,
+then run the backend decoder to rebuild `[576,1152]`. Alpha is applied to the
+source sanitizer before PCA (`k=4`); rank and alpha are varied as shown.
 
-The client applies the selected sanitizer to the 196×768 SigLIP source grid,
-projects it to 196×64, quantizes each row to int8 with a scale, and zlib
-compresses the representation. The backend reconstructs the source grid from
-the shared basis and rebuilds the planner's 576×1152 tensor with the
-deterministic adapter. Measured using the browser serializer and reconstruction
-on five reference images:
+| PCA rank | Alpha | Mean tensor JSON bytes (min–max) | Held-out mean patch cosine (min–max per page) |
+|---:|---:|---:|---:|
+| 64 | 0 | 15,934 (15,710–16,414) | 0.759635 (0.620245–0.803485) |
+| 64 | 0.01 | 15,934 (15,718–16,414) | 0.759635 (0.620245–0.803482) |
+| 128 | 0 | 28,983 (28,419–30,703) | 0.842008 (0.708113–0.874339) |
+| 128 | 0.01 | 28,984 (28,431–30,703) | 0.842008 (0.708113–0.874344) |
 
-| Metric | Mean (min–max across 5 images) |
-|---|---:|
-| Compressed body | 11,269 B (10,801–11,956) |
-| Base64 data field | 15,027 B (14,404–15,944) |
-| Serialized latent-frame JSON, UTF-8 | 15,666 B (15,043–16,583) |
-| Mean patch cosine vs. full adapted, sanitized tensor | 0.497006 (0.334886–0.708730) |
-| Mean patch cosine vs. original full adapted tensor | 0.494778 (0.329871–0.716340) |
-| Minimum single-patch cosine observed | -0.176877 |
+These are tensor-object JSON bytes (including Base64 data, excluding the
+constant latent-frame envelope and WebSocket framing). Both measured ranks are
+below the 45,056-byte target. Rank 128 costs about 13 KB more for higher
+held-out cosine; alpha 0.01 had negligible impact on this reconstruction
+metric. Cosine is not action accuracy or evidence that sensitive content
+cannot be recovered.
 
-This source-PCA mode reaches the `<45 KB` JSON-wire target: all five serialized
-latent-frame JSON messages were below 16.6 KB (UTF-8; WebSocket framing bytes
-excluded). It does so with low and image-dependent reconstruction fidelity.
-The reported fidelity is a reconstruction metric, not action accuracy; action
-accuracy remains unmeasured and is deferred to Task 5.
+The basis occupies 396,288 bytes. Fit seed, model/runtime versions, public URLs,
+page split (52 synthetic / 9 public held out), SHA-256, and per-page held-out
+results are recorded in
+`backend/eval/siglip/fixtures/source-pca-metadata.json`. Public screenshots
+were not committed; the URLs can be recaptured, but live page contents may
+change after the recorded capture time.
+
+The measured source-PCA tensor JSON sizes are below the 45,056-byte target at
+both ranks, including the configured `alpha=0.01`. This size result has a
+fidelity tradeoff: held-out mean patch cosine was `0.759635` at rank 64 and
+`0.842008` at rank 128. It is not evidence of action-accuracy parity or
+resistance to inversion.
+
+### Task 5 — Inversion benchmark status
+
+The 10-page CI smoke test passed with a fixed seed, real SigLIP ONNX
+embeddings, an 8/2 page-level train/validation split, and two decoder epochs.
+It trained the unmodified `V` and `Vprime_svd_k4_alpha001` decoder paths.
+EasyOCR was explicitly skipped. This proves the selected pipeline paths run;
+it does not measure held-out PSNR, SSIM, OCR accuracy, digit-string accuracy,
+or whether `V'` remains invertible. Full 500-page dataset generation is
+underway; the full decoder evaluation has not yet run, so no full-benchmark
+results are claimed here.
 
 The SVD integration test ran on a real login screenshot through the browser
 SigLIP encoder and adapted `[576,1152]` embeddings with `k=4`, `alpha=0`, and
@@ -181,11 +196,15 @@ the browser parity/latency check with `cd client; npm run test:siglip`.
 Measured by the Playwright test with a 1280×720 viewport and the production
 `scanSensitiveRegions()` and `mapRegionsToPatchesTs()` implementations:
 
-| Page | Scanner regions | `I_sens` patch count | Result |
-|---|---:|---:|---|
-| Login | 3 | 40 | Exact patch-set assertion passed for the visible password and marked canvas |
-| Checkout | 6 | 64 | Exact patch-set assertion passed for card number, CVV, name, and marked canvas |
-| No-sensitive-fields page | 0 | 0 | Empty `I_sens` assertion passed |
+| Page | Scanner regions | Target `I_sens` (24×24) | Target grid fraction | Source indices (14×14) | Source grid fraction |
+|---|---:|---:|---:|---:|---:|
+| Login | 3 | 40/576 | 6.94% | 18/196 | 9.18% |
+| Checkout | 6 | 64/576 | 11.11% | 30/196 | 15.31% |
+| No-sensitive-fields page | 0 | 0/576 | 0% | 0/196 | 0% |
+
+Fractions are the percentage of patch-grid cells flagged, not exact pixel-area
+coverage. Source indices use the production target-to-source center mapping.
+Exact target patch-set assertions passed at 1280×720.
 
 The scanner reports the marked canvas under both its `data-vdlm-sensitive`
 custom selector and its accessible sensitive-role detection; those regions map

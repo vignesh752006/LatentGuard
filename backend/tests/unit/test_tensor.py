@@ -12,7 +12,7 @@ import torch
 from app.schemas.messages import TensorPayload
 from app.tensor.serialization import contract_from_settings, decode_tensor_payload
 from eval.siglip.adapter import adapt_siglip_embeddings
-from eval.siglip.source_pca import load_basis, reconstruct_source_pca
+from app.encoding.source_pca import load_basis, reconstruct_source_pca
 from tests.conftest import make_sanitized_tensor, make_test_settings
 
 
@@ -149,13 +149,26 @@ def test_source_pca_payload_rebuilds_full_contract_tensor():
 
     decoded = decode_tensor_payload(payload, contract, settings.vdlm_max_tensor_elements)
     expected_source = reconstruct_source_pca(
-        quantized.astype(np.float32) * scales[:, None] / 127.0,
+        scales[:, None] * (quantized.astype(np.float32) / 127.0),
         mean,
         components[:rank],
     )
     expected = adapt_siglip_embeddings(expected_source)
     assert decoded.shape == (576, 1152)
     np.testing.assert_allclose(decoded.numpy(), expected, rtol=0, atol=2e-6)
+
+
+def test_backend_and_browser_source_pca_bases_match():
+    client_basis = (
+        Path(__file__).resolve().parents[3]
+        / "client"
+        / "public"
+        / "pca"
+        / "source-pca-v1.bin"
+    )
+    from app.encoding.source_pca import BASIS_PATH
+
+    assert client_basis.read_bytes() == BASIS_PATH.read_bytes()
 
 
 def test_source_pca_rejects_invalid_rank_before_decoding():

@@ -28,7 +28,7 @@ from app.observability.logging import get_logger
 from app.schemas.messages import TensorPayload
 from app.security.payload_guard import PayloadRejected
 from eval.siglip.adapter import adapt_siglip_embeddings
-from eval.siglip.source_pca import (
+from app.encoding.source_pca import (
     MAX_COMPONENTS as SOURCE_PCA_MAX_COMPONENTS,
     SOURCE_PATCHES,
     load_basis as load_source_pca_basis,

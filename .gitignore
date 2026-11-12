@@ -8,6 +8,7 @@ backend/.env
 # Node
 client/node_modules/
 client/dist/
+client/test-results/
 *.tsbuildinfo
 
 # OS / IDE
@@ -18,3 +19,8 @@ client/dist/
 # WASM build output (optional local build)
 client/public/wasm/
 client/public/models/
+
+# Generated evaluation inputs and runs
+backend/eval/siglip/fixtures/public-pages/
+backend/eval/siglip/fixtures/pca-pages/
+backend/eval/inversion/runs/

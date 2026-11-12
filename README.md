@@ -251,7 +251,7 @@ smart-privacy-agent/
 - visible tab capture stays on device — **raw screenshot is not sent to backend**
 - dom scanner finds password/input field **bounding boxes** (geometry only, not text values)
 - ONNX SigLIP runs locally (WebGPU when available, WASM otherwise); SVD sanitization runs locally on CPU
-- sanitized `V'` is sent as fp16 by default; experimental source-PCA mode sends a reduced `196×768` source representation
+- source-grid PCA is the default payload representation (`196×64` int8 coefficients); standard full-tensor fp16 remains selectable
 - backend rejects forbidden fields (screenshot, dom html, credentials)
 - session uuid, frame ids, state_version sync
 - stale plan detection when page state drifts
@@ -265,11 +265,11 @@ smart-privacy-agent/
 | **vision encoder** | ONNX SigLIP runs by default; the procedural encoder is an explicit test mode |
 | **onnx / siglip mode** | Requires local FP16, FP32 fallback, and adapter models; missing or invalid models raise an error and never silently use the mock |
 | **VDLM sanitization** | CPU SVD null-space projection is the default (k=4); rank-1 is selectable as a baseline. This is not a formal privacy guarantee |
-| **source PCA payload** | Experimental compact mode projects sanitized 196×768 SigLIP tokens; backend rebuilds the 576×1152 tensor. Five-fixture JSON wire frames averaged 15,666 B (<45 KB), but mean patch cosine was 0.497 vs. the full adapted sanitized tensor |
+| **source PCA payload** | Default mode projects sanitized 196×768 SigLIP tokens; backend rebuilds the 576×1152 tensor. On 61 held-out pages, rank 64 averaged 15,934 B and 0.7596 patch cosine; rank 128 averaged 28,983 B and 0.8420. See `docs/ASSUMPTIONS.md` for limits and methodology |
 | **backend planner** | `VDLM_MODEL_PROVIDER=mock` — keyword rules (`scroll` → scroll, `click` → click at dominant patch). **not** llama-3-70b reasoning |
 | **llama provider** | code stub exists (`llama_planner.py`) but needs a separate openai-compatible api server + api key |
-| **payload size** | Standard mode sends a full adapted tensor. The experimental PCA wire size and reconstruction fidelity are recorded in `docs/ASSUMPTIONS.md`; small projections may lose substantial signal |
-| **privacy guarantees** | no zero-knowledge proof, no cryptographic attestation, no adversarial inversion testing |
+| **payload size** | Source-PCA is the client default; it reaches the size target only with measured reconstruction-fidelity loss recorded in `docs/ASSUMPTIONS.md` |
+| **privacy guarantees** | no zero-knowledge proof, no cryptographic attestation; inversion results are benchmark-specific and are not a privacy guarantee |
 | **wasm patch mapper** | rust source is in repo but wasm binary is **not** prebuilt — demo uses typescript fallback unless you run `npm run build:wasm` with rust installed |
 
 ---
@@ -279,10 +279,10 @@ smart-privacy-agent/
 these are the main gaps between this prototype and the full research blueprint:
 
 1. replace keyword mock planner with **visual grounding** or llama/vlm that uses page information
-2. measure sanitizer utility and privacy against the inversion benchmark
+2. validate sanitizer utility against broader real-world tasks beyond the synthetic inversion benchmark
 3. ship prebuilt **rust wasm** patch mapper in the default path
 4. reduce payloads toward 45 KB without the measured fidelity loss
-5. **feature inversion evaluation** harness
+5. validate reconstruction utility/action accuracy after the inversion benchmark
 6. improve latency toward the 350 ms target
 7. cryptographic provenance / attestation (research hardening)
 
@@ -292,14 +292,27 @@ these are the main gaps between this prototype and the full research blueprint:
 
 ### SigLIP ONNX encoder (default)
 
-Install the export dependencies and create the local ONNX models and source-PCA
-basis:
+Install the export dependencies and create the local ONNX models:
 
 ```powershell
 python -m pip install -e "backend[siglip-eval]"
 python scripts/download-siglip-onnx.py --out-dir client/public/models
+```
+
+For the measured source-PCA basis, capture 20+ public pages and render the
+controlled training pages before fitting:
+
+```powershell
+cd client
+node scripts/capture-public-pca-pages.mjs
+node scripts/render-inversion-pages.mjs --out-dir ..\backend\eval\siglip\fixtures\pca-pages --count 280 --seed 156017
+cd ..
 python backend/eval/siglip/fit_source_pca.py
 ```
+
+The backend canonical basis lives at
+`backend/app/encoding/data/source-pca-v1.bin`; the identical file is copied to
+`client/public/pca/source-pca-v1.bin` for browser inference.
 
 For the PowerShell wrapper use `scripts/download-siglip-onnx.ps1`; on
 POSIX-compatible systems use `scripts/download-siglip-onnx.sh`. The wrappers
@@ -314,6 +327,21 @@ procedural encoder. Source PCA payload mode requires the fitted basis. See
 [backend/eval/siglip/README.md](backend/eval/siglip/README.md) for reference
 fixtures, exact preprocessing, PCA fit, measured payload sizes, export details,
 and parity/latency tests.
+
+### Inversion benchmark (Task 5)
+
+The full evaluation uses 500 Playwright-rendered pages, actual local SigLIP
+ONNX embeddings, the exact source-PCA int8/zlib wire format and backend
+reconstruction, and convolutional decoders:
+
+```powershell
+python -m pip install -e "backend[inversion-eval]"
+python backend/eval/inversion/run_benchmark.py --n 500 --epochs 30
+```
+
+For a quick two-epoch smoke run, use `--n 10 --epochs 2 --skip-ocr`. Generated
+pages and model files remain in ignored local run directories. The benchmark
+writes `docs/EVAL_INVERSION.md`, machine-readable metrics, and PNG charts.
 
 backend `.env`:
 

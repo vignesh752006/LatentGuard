@@ -38,6 +38,18 @@ function sortedRegions(regions: SensitiveRegion[]): SensitiveRegion[] {
   );
 }
 
+function mapTargetToSourcePatches(targetIndices: number[]): number[] {
+  const mapped = new Set<number>();
+  for (const index of targetIndices) {
+    const row = Math.floor(index / 24);
+    const col = index % 24;
+    const sourceRow = Math.min(13, Math.floor((row + 0.5) * 14 / 24));
+    const sourceCol = Math.min(13, Math.floor((col + 0.5) * 14 / 24));
+    mapped.add(sourceRow * 14 + sourceCol);
+  }
+  return [...mapped].sort((a, b) => a - b);
+}
+
 async function assertExactSensitiveRegions(
   page: import("@playwright/test").Page,
   expected: SensitiveRegion[],
@@ -56,10 +68,13 @@ async function assertExactSensitiveRegions(
   const fieldIndices = mapRegionsToPatchesTs(VIEWPORT.width, VIEWPORT.height, fields);
   expect(scan.indices).toEqual(expectedIndices);
   expect(scan.indices).toEqual(expect.arrayContaining(fieldIndices));
+  const sourceIndices = mapTargetToSourcePatches(scan.indices);
 
   console.info(
     `[Task 2] ${label} viewport=${scan.viewport.width}x${scan.viewport.height}; ` +
-      `sensitive regions=${scan.regions.length}; I_sens patches=${scan.indices.length}; ` +
+      `sensitive regions=${scan.regions.length}; ` +
+      `I_sens target=${scan.indices.length}/576 (${(100 * scan.indices.length / 576).toFixed(2)}%); ` +
+      `source=${sourceIndices.length}/196 (${(100 * sourceIndices.length / 196).toFixed(2)}%); ` +
       `indices=${scan.indices.join(",")}`,
   );
 }

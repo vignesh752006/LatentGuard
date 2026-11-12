@@ -25,7 +25,7 @@ function Popup() {
   const [sanitizerMode, setSanitizerMode] = useState<"svd" | "rank1">("svd");
   const [sanitizerK, setSanitizerK] = useState(4);
   const [sanitizerAlpha, setSanitizerAlpha] = useState(0.01);
-  const [payloadMode, setPayloadMode] = useState<"standard" | "source-pca">("standard");
+  const [payloadMode, setPayloadMode] = useState<"standard" | "source-pca">("source-pca");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 

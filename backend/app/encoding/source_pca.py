@@ -1,7 +1,7 @@
 """Shared source-grid PCA representation used by the compact wire decoder."""
 
-from pathlib import Path
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 
@@ -9,13 +9,7 @@ SOURCE_DIM = 768
 SOURCE_PATCHES = 196
 MAX_COMPONENTS = 128
 VERSION = "source_pca_v1"
-BASIS_PATH = (
-    Path(__file__).resolve().parents[3]
-    / "client"
-    / "public"
-    / "pca"
-    / "source-pca-v1.bin"
-)
+BASIS_PATH = Path(__file__).resolve().parent / "data" / "source-pca-v1.bin"
 
 
 @lru_cache(maxsize=1)

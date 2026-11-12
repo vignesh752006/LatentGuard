@@ -38,6 +38,10 @@ Transport: WebSocket at `/ws/v1/session` (JSON envelopes).
 ### `latent.frame`
 
 Sanitized tensor `V'`. **Never** include raw screenshot bytes.
+The client defaults to the `source_pca_v1` transform: `[196,64]` int8
+coefficients, per-row float32 scales, zlib compression, and backend
+reconstruction to `[576,1152]`. Full `[576,1152]` float16 remains selectable
+from the popup. See the format below.
 
 ```json
 {
@@ -174,7 +178,7 @@ Backend accepts full tensors for development. The source-PCA `transform` added
 in protocol v1.1 is the measured compact representation; its size and fidelity
 trade-off are documented in `docs/ASSUMPTIONS.md`.
 
-### Experimental source-PCA tensor (`protocol_version: 1.1`)
+### Source-PCA tensor (`protocol_version: 1.1`)
 
 Source-PCA payloads carry quantized SigLIP patch coefficients. The server
 reconstructs the 196×768 source grid from its checked-in `source_pca_v1` basis,
