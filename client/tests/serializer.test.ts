@@ -48,6 +48,40 @@ describe("tensor serialization", () => {
     expect(frame.spatial_metadata.sensitive_patch_indices).toEqual([10, 20]);
   });
 
+  it("serializes exactly 576 score values from the provided typed-array slice", () => {
+    const scores = new Float32Array(578);
+    scores[1] = 0.75;
+    const scoreSlice = scores.subarray(1, 577);
+    const frame = buildLatentFramePayload({
+      frameId: "f-score",
+      stateVersion: 1,
+      sanitizedMatrix: new Float32Array(
+        TENSOR_CONTRACT.patchCount * TENSOR_CONTRACT.embeddingDim,
+      ),
+      sensitivePatchIndices: [],
+      viewportHash: "sha256:score",
+      lastActionId: null,
+      scoreGrid: scoreSlice,
+    });
+    const bytes = decodeBase64ToUint8(frame.score_grid!.data);
+    expect(bytes.byteLength).toBe(576 * Float32Array.BYTES_PER_ELEMENT);
+    expect(frame.score_grid!.shape).toEqual([24, 24]);
+  });
+
+  it("rejects malformed score-grid lengths", () => {
+    expect(() => buildLatentFramePayload({
+      frameId: "f-score",
+      stateVersion: 1,
+      sanitizedMatrix: new Float32Array(
+        TENSOR_CONTRACT.patchCount * TENSOR_CONTRACT.embeddingDim,
+      ),
+      sensitivePatchIndices: [],
+      viewportHash: "sha256:score",
+      lastActionId: null,
+      scoreGrid: new Float32Array(575),
+    })).toThrow(/task-similarity scores/);
+  });
+
   it("rejects forbidden outbound fields", () => {
     expect(() => assertOutboundPayloadSafe({ screenshot: "x" })).toThrow();
   });

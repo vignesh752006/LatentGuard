@@ -140,3 +140,34 @@ linear-congruential generator (`state = (1664525 * state + 1013904223) mod
 2^32`, seed `0xdeadbeef`), fill row-major float32 values in [-1, 1], and
 normalize each output column to unit L2 norm. `projection-matrix.sha256` is
 the shared byte-for-byte fixture checked by both test suites.
+
+## Local text scoring
+
+Export the SigLIP text tower, the browser-compatible tokenizer, and the score
+adapter with:
+
+```powershell
+python scripts/export-siglip-text-onnx.py --out-dir client/public/models
+```
+
+The exporter converts the checkpoint's SentencePiece tokenizer to
+`tokenizer.json` and verifies token IDs and attention masks against the Python
+tokenizer for five planner intents. It exports the 64-token text tower in
+FP32/FP16 and two score graphs. In source-PCA mode, the graph bilinearly
+upsamples the sanitized 196×768 source grid to 24×24 and computes patchwise
+cosine against the ONNX text-tower pooled hidden state. Full-grid mode uses the
+pseudoinverse of the fixed 768×1152 adapter to recover patch features before
+scoring. These are patchwise hidden-state cosines, not SigLIP's full-image
+contrastive logits. The text embedding is computed locally; the task intent is
+already session metadata, and the 24×24 score grid is sent with each latent
+frame.
+
+Run Python reference parity after export:
+
+```powershell
+python -m pytest backend/eval/siglip/test_text_onnx.py -v
+```
+
+The tests compare text embeddings and score grids against the Hugging Face
+checkpoint and assert exact tokenizer token/mask parity. Browser integration
+parity is exercised by `cd client; npm run test:siglip`.

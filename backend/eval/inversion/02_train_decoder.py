@@ -114,6 +114,8 @@ def train(
         "state_dict": model.cpu().state_dict(),
         "sanitizer_key": sanitizer_key,
         "epochs": epochs,
+        "batch_size": batch_size,
+        "learning_rate": learning_rate,
         "seed": 26171,
         "architecture": "conv1x1-1152x64+transposed-conv-24-to-192",
     }, model_path)
@@ -122,6 +124,8 @@ def train(
         "training_pages": len(train_dataset),
         "validation_pages": len(validation_dataset),
         "epochs": epochs,
+        "batch_size": batch_size,
+        "learning_rate": learning_rate,
         "device": str(device),
         "model": str(model_path),
         "history": history,

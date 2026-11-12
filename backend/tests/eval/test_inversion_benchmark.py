@@ -44,6 +44,14 @@ def test_mini_inversion_pipeline_10_pages_2_epochs(tmp_path: Path):
         "9001",
     )
     assert len(list(data_dir.glob("sample_*.npz"))) == 10
+    manifest = json.loads((data_dir / "dataset-manifest.json").read_text(encoding="utf-8"))
+    assert set(manifest["training_templates"]).isdisjoint(manifest["validation_templates"])
+    assert len(set(manifest["training_templates"]) | set(manifest["validation_templates"])) == 8
+    for index in range(10):
+        page_metadata = json.loads(
+            (pages_dir / f"sample_{index:04d}.json").read_text(encoding="utf-8")
+        )
+        assert page_metadata["password_input_type"] == "text"
 
     keys = ["V", "Vprime_svd_k4_alpha001"]
     for key in keys:
@@ -72,10 +80,17 @@ def test_mini_inversion_pipeline_10_pages_2_epochs(tmp_path: Path):
         "--sanitizers",
         *keys,
         "--skip-ocr",
+        "--digit-probe-epochs",
+        "2",
     )
     result = json.loads((report_dir / "eval_inversion_results.json").read_text(encoding="utf-8"))
     assert result["setup"]["pages"] == 10
     assert result["setup"]["held_out_pages"] == 2
+    assert result["setup"]["decoder_training"] == {
+        key: {"epochs": 2, "batch_size": 2, "learning_rate": 0.001}
+        for key in keys
+    }
     assert set(result["results"]) == set(keys)
+    assert result["conclusion"]
     assert (report_dir / "EVAL_INVERSION.md").is_file()
     assert (report_dir / "inversion-psnr.png").is_file()

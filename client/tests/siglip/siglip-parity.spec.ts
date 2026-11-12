@@ -14,6 +14,10 @@ const modelDir = path.resolve(process.cwd(), "public", "models");
 const modelPath = path.join(modelDir, "siglip-base-patch16-224-vision-fp16.onnx");
 const wasmModelPath = path.join(modelDir, "siglip-base-patch16-224-vision-fp32.onnx");
 const adapterPath = path.join(modelDir, "siglip-base-patch16-224-adapter.onnx");
+const textModelPath = path.join(modelDir, "siglip-base-patch16-224-text-fp32.onnx");
+const textScoreAdapterPath = path.join(modelDir, "siglip-base-patch16-224-text-image-score.onnx");
+const sourceTextScoreAdapterPath = path.join(modelDir, "siglip-base-patch16-224-source-text-score.onnx");
+const tokenizerPath = path.join(modelDir, "siglip-base-patch16-224-text-tokenizer", "tokenizer.json");
 
 function readNpyFloat32(filePath: string): Float32Array {
   const file = readFileSync(filePath);
@@ -59,11 +63,15 @@ async function encodeFixture(
 }
 
 test("SigLIP ONNX matches five PyTorch reference fixtures and reports provider timings", async ({ page }) => {
+  test.setTimeout(1_200_000);
   if (!existsSync(path.join(fixtureRoot, "fixture-metadata.json"))) {
     throw new Error("Missing SigLIP references; run backend/eval/siglip/reference.py --write-fixtures");
   }
   if (!existsSync(modelPath) || !existsSync(wasmModelPath) || !existsSync(adapterPath)) {
     throw new Error("Missing ONNX model files; run scripts/download-siglip-onnx.py");
+  }
+  if (!existsSync(textModelPath) || !existsSync(textScoreAdapterPath) || !existsSync(sourceTextScoreAdapterPath) || !existsSync(tokenizerPath)) {
+    throw new Error("Missing SigLIP text ONNX, score adapters, or tokenizer; run scripts/export-siglip-text-onnx.py");
   }
   if (!existsSync(path.resolve(process.cwd(), "public", "pca", "source-pca-v1.bin"))) {
     throw new Error("Missing source PCA basis; run backend/eval/siglip/fit_source_pca.py");
@@ -76,7 +84,11 @@ test("SigLIP ONNX matches five PyTorch reference fixtures and reports provider t
     if (response.status() >= 400) console.error(`BROWSER_HTTP_${response.status()}: ${response.url()}`);
   });
   await page.goto("/tests/siglip/harness.html");
-  await page.waitForFunction(() => typeof window.verifySyntheticDeterminism === "function", null, { timeout: 10_000 });
+  await page.waitForFunction(
+    () => typeof window.verifySyntheticDeterminism === "function",
+    null,
+    { timeout: 60_000 },
+  );
   expect(await page.evaluate(() => window.verifySyntheticDeterminism(
     "/models/siglip-base-patch16-224-vision-fp16.onnx",
   ))).toBe(true);
@@ -137,6 +149,20 @@ test("SigLIP ONNX matches five PyTorch reference fixtures and reports provider t
     pcaSummaries[name] = result;
   }
 
+  const loginSource = readNpyFloat32(
+    path.join(fixtureRoot, "reference", "login.npy"),
+  );
+  const textScoreGrid = await page.evaluate(
+    async ({ sourceEmbeddings, taskIntent }) =>
+      window.scoreSiglipSourceIntent(sourceEmbeddings, taskIntent),
+    {
+      sourceEmbeddings: Array.from(loginSource),
+      taskIntent: "click the sign in button",
+    },
+  );
+  expect(textScoreGrid.shape).toEqual([24, 24]);
+  expect(textScoreGrid.finite).toBe(true);
+
   await page.evaluate(() => window.closeSiglipEncoders());
   console.info("SIGLIP_PARITY_AND_LATENCY", JSON.stringify({
     scores,
@@ -144,10 +170,14 @@ test("SigLIP ONNX matches five PyTorch reference fixtures and reports provider t
     wireBytes,
     realSiglipSvd: svdResult,
     sourcePca: pcaSummaries,
+    textScoreGrid,
     modelBytes: {
       visionFp16: statSync(modelPath).size,
       visionWasmFp32: statSync(wasmModelPath).size,
       adapter: statSync(adapterPath).size,
+      textFp32: statSync(textModelPath).size,
+      textScoreAdapter: statSync(textScoreAdapterPath).size,
+      sourceTextScoreAdapter: statSync(sourceTextScoreAdapterPath).size,
     },
   }));
 });

@@ -27,6 +27,8 @@ dev = [
 ]
 siglip-eval = [
     "transformers>=4.46,<5",
+    "sentencepiece>=0.2",
+    "protobuf>=4",
     "pillow>=11.0",
     "onnx>=1.17",
     "onnxconverter-common>=1.14",
@@ -35,6 +37,8 @@ siglip-eval = [
 ]
 inversion-eval = [
     "easyocr>=1.7.2",
+    "onnxruntime>=1.20",
+    "pillow>=11.0",
 ]
 
 [tool.setuptools.packages.find]

@@ -8,6 +8,7 @@ import {
 import type { TensorPayload } from "../../src/protocol/messages";
 import { serializeLatentFrame } from "../../src/protocol/websocket-client";
 import { sanitizeSVD } from "../../src/vdlm/svd-sanitizer";
+import { SiglipTextEncoder } from "../../src/vision/text-similarity";
 import {
   loadSourcePcaBasis,
   projectSourcePca,
@@ -28,6 +29,7 @@ type EncoderResult = {
   };
 };
 const encoders = new Map<Provider, OnnxVisionEncoder>();
+let textEncoder: SiglipTextEncoder | null = null;
 
 function encodedSize(payload: TensorPayload): { compressedBytes: number; base64Bytes: number } {
   return { compressedBytes: atob(payload.data).length, base64Bytes: payload.data.length };
@@ -55,6 +57,12 @@ declare global {
       meanPatchCosineVsSanitized: number;
       minimumPatchCosineVsSanitized: number;
       meanPatchCosineVsFull: number;
+    }>;
+    scoreSiglipSourceIntent: (sourceEmbeddings: number[], taskIntent: string) => Promise<{
+      shape: number[];
+      minimum: number;
+      maximum: number;
+      finite: boolean;
     }>;
   }
 }
@@ -138,6 +146,8 @@ window.verifySyntheticDeterminism = async (modelUrl) => {
 window.closeSiglipEncoders = () => {
   for (const encoder of encoders.values()) encoder.destroy();
   encoders.clear();
+  textEncoder?.destroy();
+  textEncoder = null;
 };
 
 window.sanitizeSiglipEmbedding = async (imageUrl, sensitiveIndices) => {
@@ -246,6 +256,35 @@ window.measureSourcePca = async (imageUrl) => {
     minimumPatchCosineVsSanitized: cosineMin,
     meanPatchCosineVsFull: fullCosineSum / 576,
   };
+};
+
+window.scoreSiglipSourceIntent = async (sourceValues, taskIntent) => {
+  const source = Float32Array.from(sourceValues);
+  if (source.length !== 196 * 768) {
+    throw new Error(`Expected 196x768 SigLIP source tokens, got ${source.length}`);
+  }
+  const sanitized = sanitizeSVD(
+    source,
+    [1, 2, 24, 25, 26, 48, 49, 50],
+    { k: 4, alpha: 0, patchCount: 196, embeddingDim: 768 },
+  ).sanitized;
+  source.fill(0);
+  textEncoder ??= new SiglipTextEncoder(
+    "/models/siglip-base-patch16-224-text-fp32.onnx",
+    ["wasm"],
+  );
+  await textEncoder.init();
+  try {
+    const scores = await textEncoder.scoreGrid(sanitized, taskIntent);
+    return {
+      shape: [24, 24],
+      minimum: Math.min(...scores),
+      maximum: Math.max(...scores),
+      finite: scores.every(Number.isFinite),
+    };
+  } finally {
+    sanitized.fill(0);
+  }
 };
 
 async function getWasmEncoder(): Promise<OnnxVisionEncoder> {

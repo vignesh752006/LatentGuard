@@ -251,6 +251,7 @@ smart-privacy-agent/
 - visible tab capture stays on device — **raw screenshot is not sent to backend**
 - dom scanner finds password/input field **bounding boxes** (geometry only, not text values)
 - ONNX SigLIP runs locally (WebGPU when available, WASM otherwise); SVD sanitization runs locally on CPU
+- local SigLIP text-tower ONNX embeds task intent; a local score adapter computes a 24×24 patch/text cosine grid from the sanitized tensor and includes it in the planner context
 - source-grid PCA is the default payload representation (`196×64` int8 coefficients); standard full-tensor fp16 remains selectable
 - backend rejects forbidden fields (screenshot, dom html, credentials)
 - session uuid, frame ids, state_version sync
@@ -263,7 +264,8 @@ smart-privacy-agent/
 | part | what the demo actually does |
 |------|----------------------------|
 | **vision encoder** | ONNX SigLIP runs by default; the procedural encoder is an explicit test mode |
-| **onnx / siglip mode** | Requires local FP16, FP32 fallback, and adapter models; missing or invalid models raise an error and never silently use the mock |
+| **onnx / siglip mode** | Requires local vision and text ONNX graphs, score adapters, and tokenizer assets; missing or invalid assets raise an error and never silently use the mock |
+| **text-to-patch scores** | Uses SigLIP's pooled text hidden state and patchwise cosine over sanitized source tokens (bilinearly upsampled to 24×24); the full-grid mode uses the fixed adapter pseudoinverse. These are not full-image contrastive logits |
 | **VDLM sanitization** | CPU SVD null-space projection is the default (k=4); rank-1 is selectable as a baseline. This is not a formal privacy guarantee |
 | **source PCA payload** | Default mode projects sanitized 196×768 SigLIP tokens; backend rebuilds the 576×1152 tensor. On 61 held-out pages, rank 64 averaged 15,934 B and 0.7596 patch cosine; rank 128 averaged 28,983 B and 0.8420. See `docs/ASSUMPTIONS.md` for limits and methodology |
 | **backend planner** | `VDLM_MODEL_PROVIDER=mock` — keyword rules (`scroll` → scroll, `click` → click at dominant patch). **not** llama-3-70b reasoning |
@@ -297,6 +299,7 @@ Install the export dependencies and create the local ONNX models:
 ```powershell
 python -m pip install -e "backend[siglip-eval]"
 python scripts/download-siglip-onnx.py --out-dir client/public/models
+python scripts/export-siglip-text-onnx.py --out-dir client/public/models
 ```
 
 For the measured source-PCA basis, capture 20+ public pages and render the
@@ -319,8 +322,8 @@ POSIX-compatible systems use `scripts/download-siglip-onnx.sh`. The wrappers
 export the public `google/siglip-base-patch16-224` checkpoint. The popup
 defaults to ONNX mode and the packaged FP16 model URL. ONNX mode tries the FP16 graph with WebGPU, then uses the
 FP32 graph on WASM; either path reports a clear initialization error if its
-required model or the adapter is missing or invalid. It never substitutes mock
-embeddings. Local model files are ignored by git and are copied into `client/dist`
+required vision/text model, score graph, or tokenizer is missing or invalid.
+It never substitutes mock embeddings. Local model files are ignored by git and are copied into `client/dist`
 by Vite when present. The popup checks for missing model files and displays a
 setup error; select **Mock (test mode)** only when intentionally testing the
 procedural encoder. Source PCA payload mode requires the fitted basis. See
@@ -335,13 +338,20 @@ ONNX embeddings, the exact source-PCA int8/zlib wire format and backend
 reconstruction, and convolutional decoders:
 
 ```powershell
-python -m pip install -e "backend[inversion-eval]"
-python backend/eval/inversion/run_benchmark.py --n 500 --epochs 30
+python -m pip install -e "backend[inversion-eval,siglip-eval]"
+python scripts/download-siglip-onnx.py --out-dir client/public/models
+cd client
+npx playwright install chromium
+cd ..
+python backend/eval/inversion/run_benchmark.py --n 500 --epochs 5 --batch-size 8 --digit-probe-epochs 30
 ```
 
-For a quick two-epoch smoke run, use `--n 10 --epochs 2 --skip-ocr`. Generated
-pages and model files remain in ignored local run directories. The benchmark
-writes `docs/EVAL_INVERSION.md`, machine-readable metrics, and PNG charts.
+The committed run uses five decoder epochs per representation; use `--epochs 30`
+for a longer training budget. To reuse an existing generated dataset, add
+`--reuse-data` and point `--run-dir` at its matching manifest. For a quick
+two-epoch smoke run, use `--n 10 --epochs 2 --skip-ocr`. Generated pages and
+model files remain in ignored local run directories. The benchmark writes
+`docs/EVAL_INVERSION.md`, machine-readable metrics, and PNG charts.
 
 backend `.env`:
 

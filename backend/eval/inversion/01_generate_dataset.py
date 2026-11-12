@@ -3,7 +3,6 @@
 import base64
 import argparse
 import json
-import random
 import subprocess
 import sys
 import zlib
@@ -35,6 +34,7 @@ MODE_CONFIGS = {
     "svd_k8_alpha0": (8, 0.0, False),
     "svd_k8_alpha001": (8, 0.01, False),
 }
+VALIDATION_TEMPLATES = {"wallet", "billing"}
 
 
 def render_pages(out_dir: Path, count: int, seed: int) -> None:
@@ -172,10 +172,26 @@ def generate_dataset(
     input_name = session.get_inputs()[0].name
     output_name = session.get_outputs()[0].name
     mean, components = load_basis()
-    page_indices = list(range(count))
-    random.Random(seed).shuffle(page_indices)
-    train_count = max(1, int(count * 0.8))
-    train_indices = set(page_indices[:train_count])
+    template_splits: dict[str, str] = {}
+    for index in range(count):
+        metadata_path = pages_dir / f"sample_{index:04d}.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        template_id = str(metadata.get("template_id", ""))
+        if not template_id:
+            raise ValueError(f"Page {index} is missing template_id")
+        template_splits[template_id] = (
+            "validation" if template_id in VALIDATION_TEMPLATES else "train"
+        )
+    train_templates = sorted(
+        template for template, split in template_splits.items() if split == "train"
+    )
+    validation_templates = sorted(
+        template for template, split in template_splits.items() if split == "validation"
+    )
+    if not train_templates or not validation_templates:
+        raise ValueError(
+            "Dataset must include at least one training and one validation template"
+        )
     settings = Settings()
     contract = contract_from_settings(settings)
     written = []
@@ -246,12 +262,13 @@ def generate_dataset(
         record_meta = {
             "index": index,
             "seed": metadata["seed"],
-            "page_type": "synthetic_checkout",
+            "template_id": metadata["template_id"],
+            "page_type": metadata["template_id"],
             "card_number": metadata["card_number"],
             "password": metadata["password"],
             "cvv": metadata["cvv"],
             "sensitive_boxes": metadata["sensitive_boxes"],
-            "train_val_split": "train" if index in train_indices else "validation",
+            "train_val_split": template_splits[metadata["template_id"]],
         }
         np.savez(
             out_dir / f"{basename}.npz",
@@ -265,6 +282,7 @@ def generate_dataset(
         written.append({
             "sample": basename,
             "split": record_meta["train_val_split"],
+            "template_id": record_meta["template_id"],
             "sensitive_target_patches": len(metadata["sensitive_patch_indices"]),
             "wire_bytes": {
                 mode: int(payloads[f"wire_{mode}"].size) for mode in MODE_CONFIGS
@@ -276,9 +294,12 @@ def generate_dataset(
     manifest = {
         "seed": seed,
         "page_count": count,
-        "training_pages": len(train_indices),
-        "validation_pages": count - len(train_indices),
-        "split_by_page": True,
+        "training_pages": sum(item["split"] == "train" for item in written),
+        "validation_pages": sum(item["split"] == "validation" for item in written),
+        "pages_dir": str(pages_dir),
+        "split_strategy": "template-group holdout; pages never cross template partitions",
+        "training_templates": train_templates,
+        "validation_templates": validation_templates,
         "model": str(MODEL_PATH),
         "model_bytes": MODEL_PATH.stat().st_size,
         "onnxruntime": ort.__version__,

@@ -14,6 +14,7 @@ class ActionPlanner(ABC):
         state_version: int,
         frame_id: str,
         last_action_id: str | None,
+        score_grid: list[float] | None = None,
     ) -> dict[str, Any]:
         """Return a dict compatible with ActionDirectivePayload fields."""
 

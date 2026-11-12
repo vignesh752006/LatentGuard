@@ -30,6 +30,7 @@ class LlamaActionPlanner(ActionPlanner):
         state_version: int,
         frame_id: str,
         last_action_id: str | None,
+        score_grid: list[float] | None = None,
     ) -> dict[str, Any]:
         system_prompt = (
             "You are a browser agent macro-action planner. You receive a spatial summary "
@@ -45,6 +46,18 @@ class LlamaActionPlanner(ActionPlanner):
             f"Last action: {last_action_id}\n\n"
             f"{spatial_features.to_prompt_context()}"
         )
+        if score_grid is not None:
+            if len(score_grid) != spatial_features.grid_rows * spatial_features.grid_cols:
+                raise ValueError(
+                    "score_grid length must match the spatial patch grid "
+                    f"({spatial_features.grid_rows * spatial_features.grid_cols})"
+                )
+            user_prompt += (
+                "\nSigLIP task-to-patch scores computed from the sanitized tensor "
+                f"({spatial_features.grid_rows}x{spatial_features.grid_cols}, row-major):\n"
+                + " ".join(f"{score:.4f}" for score in score_grid)
+                + "\n"
+            )
 
         response = await self._client.post(
             "/chat/completions",

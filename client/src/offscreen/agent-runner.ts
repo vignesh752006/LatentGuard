@@ -23,6 +23,7 @@ import {
   projectSourcePca,
   SOURCE_PCA_DEFAULT_COMPONENTS,
 } from "../vision/source-pca";
+import { SiglipTextEncoder } from "../vision/text-similarity";
 
 type VisionEncoderLike = {
   init(): Promise<void>;
@@ -79,6 +80,7 @@ export class OffscreenAgentRunner {
   private loopTimer: ReturnType<typeof setTimeout> | null = null;
   private sessionReadyWaiters: Array<(id: string) => void> = [];
   private visionEncoder: VisionEncoderLike | null = null;
+  private textEncoder: SiglipTextEncoder | null = null;
   private pipelineReady = false;
 
   async start(tabId: number, config?: ClientConfig): Promise<void> {
@@ -142,11 +144,23 @@ export class OffscreenAgentRunner {
     if (this.pipelineReady) return;
     if (this.config?.visionMode === "onnx") {
       const { OnnxVisionEncoder } = await import("../vision/onnx-encoder");
-      this.visionEncoder = new OnnxVisionEncoder(this.config.onnxModelUrl);
+      const visionEncoder = new OnnxVisionEncoder(this.config.onnxModelUrl);
+      const textEncoder = new SiglipTextEncoder();
+      await visionEncoder.init();
+      try {
+        await textEncoder.init();
+      } catch (error) {
+        visionEncoder.destroy();
+        textEncoder.destroy();
+        throw error;
+      }
+      this.visionEncoder = visionEncoder;
+      this.textEncoder = textEncoder;
     } else {
       this.visionEncoder = new VisionEncoder();
+      this.textEncoder = null;
     }
-    await this.visionEncoder.init();
+    if (this.config?.visionMode !== "onnx") await this.visionEncoder.init();
     this.pipelineReady = true;
   }
 
@@ -230,6 +244,7 @@ export class OffscreenAgentRunner {
       let sanitized: Float32Array | undefined;
       let sourcePcaCoefficients: Float32Array | undefined;
       let pcaComponentCount: number | undefined;
+      let scoreGrid: Float32Array | undefined;
       let encodeStart = performance.now();
       if (this.config.payloadMode === "source-pca") {
         if (!this.visionEncoder?.encodePatches) {
@@ -252,26 +267,45 @@ export class OffscreenAgentRunner {
             patchCount: 196,
             embeddingDim: 768,
           }).sanitized;
-        const basis = await loadSourcePcaBasis();
-        pcaComponentCount = SOURCE_PCA_DEFAULT_COMPONENTS;
-        sourcePcaCoefficients = projectSourcePca(
-          sanitizedSource,
-          basis,
-          pcaComponentCount,
-        );
-        source.fill(0);
-        sanitizedSource.fill(0);
+        try {
+          const basis = await loadSourcePcaBasis();
+          pcaComponentCount = SOURCE_PCA_DEFAULT_COMPONENTS;
+          sourcePcaCoefficients = projectSourcePca(
+            sanitizedSource,
+            basis,
+            pcaComponentCount,
+          );
+          if (!this.textEncoder) {
+            throw new Error("SigLIP text encoder is unavailable in ONNX mode.");
+          }
+          scoreGrid = await this.textEncoder.scoreGrid(
+            sanitizedSource,
+            this.config.taskIntent,
+          );
+        } finally {
+          source.fill(0);
+          sanitizedSource.fill(0);
+        }
       } else {
         const embeddings = await this.visionEncoder!.encode(imageData);
         mark("encode", encodeStart);
         encodeStart = performance.now();
-        sanitized = sanitizerMethod === "rank1"
-          ? sanitizeRankOne(embeddings, sensitivity.sensitivePatchIndices, this.config.sanitizerAlpha)
-          : sanitizeSVD(embeddings, sensitivity.sensitivePatchIndices, {
-            k: this.config.sanitizerK,
-            alpha: this.config.sanitizerAlpha,
-          }).sanitized;
-        embeddings.fill(0);
+        try {
+          sanitized = sanitizerMethod === "rank1"
+            ? sanitizeRankOne(embeddings, sensitivity.sensitivePatchIndices, this.config.sanitizerAlpha)
+            : sanitizeSVD(embeddings, sensitivity.sensitivePatchIndices, {
+              k: this.config.sanitizerK,
+              alpha: this.config.sanitizerAlpha,
+            }).sanitized;
+          if (this.textEncoder) {
+            scoreGrid = await this.textEncoder.scoreGrid(
+              sanitized,
+              this.config.taskIntent,
+            );
+          }
+        } finally {
+          embeddings.fill(0);
+        }
       }
       mark("sanitize", encodeStart);
 
@@ -291,6 +325,7 @@ export class OffscreenAgentRunner {
         viewportHash,
         lastActionId: null,
         compress: this.config.compressPayload,
+        scoreGrid,
         sanitizationMethod: sanitizerMethod === "svd"
           ? `svd_nullspace_k${this.config.sanitizerK}`
           : "rank1_nullspace_baseline",

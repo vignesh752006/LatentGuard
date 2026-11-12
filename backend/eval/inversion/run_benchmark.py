@@ -1,6 +1,7 @@
 """Run Task 5 dataset generation, decoder training, and evaluation end to end."""
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,8 @@ def main() -> None:
     parser.add_argument("--run-dir", type=Path, default=DEFAULT_RUN_DIR)
     parser.add_argument("--out-dir", type=Path, default=ROOT / "docs")
     parser.add_argument("--skip-ocr", action="store_true")
+    parser.add_argument("--reuse-data", action="store_true")
+    parser.add_argument("--digit-probe-epochs", type=int, default=30)
     args = parser.parse_args()
     data_dir = args.run_dir / "data"
     pages_dir = args.run_dir / "pages"
@@ -42,16 +45,29 @@ def main() -> None:
     trainer = INVERSION_DIR / "02_train_decoder.py"
     evaluator = INVERSION_DIR / "03_evaluate.py"
 
-    run([
-        sys.executable,
-        str(generator),
-        "--out-dir",
-        str(data_dir),
-        "--pages-dir",
-        str(pages_dir),
-        "--n",
-        str(args.n),
-    ])
+    if args.reuse_data:
+        manifest_path = data_dir / "dataset-manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"--reuse-data requested, but the dataset manifest is missing: {manifest_path}"
+            )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("page_count") != args.n:
+            raise ValueError(
+                f"--reuse-data expected {args.n} pages, found {manifest.get('page_count')}"
+            )
+        print(f"[run] reusing {args.n} pages from {data_dir}")
+    else:
+        run([
+            sys.executable,
+            str(generator),
+            "--out-dir",
+            str(data_dir),
+            "--pages-dir",
+            str(pages_dir),
+            "--n",
+            str(args.n),
+        ])
     for sanitizer in SANITIZERS:
         run([
             sys.executable,
@@ -78,6 +94,8 @@ def main() -> None:
         str(args.out_dir),
         "--sanitizers",
         *SANITIZERS,
+        "--digit-probe-epochs",
+        str(args.digit_probe_epochs),
     ]
     if args.skip_ocr:
         command.append("--skip-ocr")

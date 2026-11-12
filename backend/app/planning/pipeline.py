@@ -15,12 +15,13 @@ from app.session.browser_state import BrowserSession
 from app.validation.action_schema import validate_action_directive
 
 import base64
-import struct
+import binascii
 import logging
-
-logger = logging.getLogger(__name__)
+import math
+import struct
 
 MAX_PLANNER_RETRIES = 3
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -37,12 +38,18 @@ def _decode_score_grid(sg: ScoreGrid | None) -> list[float] | None:
     if sg is None:
         return None
     try:
-        raw = base64.b64decode(sg.data)
-        n = len(raw) // 4
-        return list(struct.unpack(f"<{n}f", raw[:n * 4]))
-    except Exception as exc:
-        logger.warning("Failed to decode score_grid: %s", exc)
-        return None
+        raw = base64.b64decode(sg.data, validate=True)
+    except binascii.Error as exc:
+        raise ValueError("score_grid.data must be valid base64") from exc
+    expected_bytes = 24 * 24 * 4
+    if len(raw) != expected_bytes:
+        raise ValueError(
+            f"score_grid must contain exactly {expected_bytes} bytes, got {len(raw)}"
+        )
+    scores = list(struct.unpack("<576f", raw))
+    if not all(math.isfinite(score) for score in scores):
+        raise ValueError("score_grid contains non-finite values")
+    return scores
 
 
 class ActionPlanningPipeline:

@@ -114,9 +114,20 @@ export function buildLatentFramePayload(params: {
   sanitizationMethod?: string;
 }): LatentFramePayload {
   let scoreGridField: ScoreGrid | undefined;
-  if (params.scoreGrid && params.scoreGrid.length === TENSOR_CONTRACT.patchCount) {
+  if (params.scoreGrid) {
+    if (params.scoreGrid.length !== TENSOR_CONTRACT.patchCount) {
+      throw new Error(
+        `Expected ${TENSOR_CONTRACT.patchCount} task-similarity scores, got ${params.scoreGrid.length}`,
+      );
+    }
     scoreGridField = {
-      data: uint8ToBase64(new Uint8Array(params.scoreGrid.buffer)),
+      data: uint8ToBase64(
+        new Uint8Array(
+          params.scoreGrid.buffer,
+          params.scoreGrid.byteOffset,
+          params.scoreGrid.byteLength,
+        ),
+      ),
       shape: [24, 24],
     };
   }

@@ -16,6 +16,6 @@ export default defineConfig({
     command: "npm run dev -- --host 127.0.0.1 --port 4173 --strictPort",
     url: "http://127.0.0.1:4173/demo-pages/login.html",
     reuseExistingServer: true,
-    timeout: 30_000,
+    timeout: 120_000,
   },
 });
