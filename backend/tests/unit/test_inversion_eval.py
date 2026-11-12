@@ -1,190 +1,110 @@
-"""
-Task 5 — Inversion benchmark unit tests (CI-safe, no GPU/Playwright)
-
-Tests the synthetic data generation, sanitizers, and eval metrics.
-"""
-
-import json
-import math
-import tempfile
+import importlib.util
+import sys
 from pathlib import Path
 
 import numpy as np
-import pytest
 
-# Load the eval modules via importlib (they are standalone scripts, not packages)
-import importlib.util
-
-EVAL_DIR = Path(__file__).parent.parent.parent / "eval" / "inversion"
+INVERSION_DIR = Path(__file__).parents[2] / "eval" / "inversion"
 
 
-def _load(name, fname):
-    path = EVAL_DIR / fname
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+def _load(name: str, filename: str):
+    spec = importlib.util.spec_from_file_location(name, INVERSION_DIR / filename)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load benchmark module {filename}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
-gen = _load("gen01", "01_generate_dataset.py")
-ev  = _load("ev03",  "03_evaluate.py")
+dataset = _load("inversion_dataset", "01_generate_dataset.py")
+evaluation = _load("inversion_evaluation", "03_evaluate.py")
 
 
-# ---- Dataset generation -------------------------------------------------------
+def test_rank1_mean_baseline_projects_sensitive_mean_direction():
+    source = np.random.default_rng(42).standard_normal((12, 8)).astype(np.float32)
+    sensitive = [0, 1, 2, 3]
+    direction = source[sensitive].mean(axis=0)
+    direction /= np.linalg.norm(direction)
 
-def test_make_synthetic_embedding_shape():
-    V = gen.make_synthetic_embedding(seed=42)
-    assert V.shape == (576, 1152)
-    assert V.dtype == np.float32
+    sanitized = dataset.sanitize_source(
+        source,
+        sensitive,
+        rank=1,
+        alpha=0,
+        rank1_baseline=True,
+    )
 
-
-def test_make_synthetic_embedding_deterministic():
-    V1 = gen.make_synthetic_embedding(seed=7)
-    V2 = gen.make_synthetic_embedding(seed=7)
-    np.testing.assert_array_equal(V1, V2)
-
-
-def test_make_isens_login():
-    isens = gen.make_isens("login", seed=0)
-    assert len(isens) > 0
-    assert int(isens.min()) >= 0
-    assert int(isens.max()) < 576
-    assert isens.dtype == np.int32
+    assert sanitized.shape == source.shape
+    assert sanitized.dtype == np.float32
+    np.testing.assert_allclose(sanitized @ direction, 0, atol=1e-5)
 
 
-def test_make_isens_checkout():
-    isens = gen.make_isens("checkout", seed=5)
-    assert len(isens) > 0
-    assert int(isens.max()) < 576
+def test_svd_sanitizer_caps_rank_to_sensitive_rows_and_preserves_shape():
+    source = np.random.default_rng(5).standard_normal((12, 8)).astype(np.float32)
+    sanitized = dataset.sanitize_source(source, [0, 1], rank=8, alpha=0)
+
+    assert sanitized.shape == source.shape
+    assert sanitized.dtype == np.float32
+    assert np.isfinite(sanitized).all()
 
 
-def test_generate_synthetic_dataset():
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-        out_dir = Path(tmpdir)
-        gen._generate_synthetic(out_dir, n=5, pages=["login", "checkout"])
+def test_gram_eigendecomposition_matches_svd_right_subspace():
+    rows = np.random.default_rng(16).standard_normal((6, 8)).astype(np.float32)
+    expected = np.linalg.svd(rows, full_matrices=False)[2]
+    actual = dataset.right_singular_vectors(rows)
 
-        files = sorted(out_dir.glob("sample_*.npz"))
-        assert len(files) == 5
-
-        # Validate first sample — use allow_pickle and close explicitly to avoid
-        # Windows file-locking during TemporaryDirectory cleanup.
-        d = np.load(files[0], allow_pickle=True)
-        keys_present = list(d.keys())
-        V_shape    = d["V"].shape
-        shot_shape = d["screenshot"].shape
-        isens_dtype = d["isens"].dtype
-        meta_raw   = str(d["metadata"][0])
-        d.close()  # release the file handle before the tempdir is deleted
-
-        for key in ("V", "isens", "V_rank1", "V_svd_k1", "V_svd_k4", "V_svd_k8", "V_svd_k1_noise"):
-            assert key in keys_present, f"Missing key: {key}"
-
-        assert V_shape == (576, 1152)
-        assert shot_shape == (224, 224, 3)
-        assert isens_dtype == np.int32
-
-        # Validate metadata
-        meta = json.loads(meta_raw)
-        assert "page_type" in meta
-        assert meta["page_type"] in ("login", "checkout")
+    assert actual.shape == expected.shape
+    np.testing.assert_allclose(actual @ actual.T, np.eye(6), atol=1e-5)
+    np.testing.assert_allclose(np.abs(actual @ expected.T), np.eye(6), atol=1e-4)
 
 
-# ---- Sanitizer shapes and correctness ----------------------------------------
-
-def test_rank1_sanitizer_shape_and_dtype():
-    V = gen.make_synthetic_embedding(1)
-    isens = gen.make_isens("login", 1)
-    Vp = gen.apply_rank1_sanitizer(V, isens)
-    assert Vp.shape == (576, 1152)
-    assert Vp.dtype == np.float32
+def test_empty_sensitive_set_is_identity():
+    source = np.random.default_rng(7).standard_normal((12, 8)).astype(np.float32)
+    sanitized = dataset.sanitize_source(source, [], rank=4, alpha=0.01)
+    np.testing.assert_array_equal(sanitized, source)
 
 
-def test_rank1_sanitizer_modifies_embeddings():
-    V = gen.make_synthetic_embedding(2)
-    isens = gen.make_isens("login", 2)
-    Vp = gen.apply_rank1_sanitizer(V, isens)
-    assert not np.allclose(V, Vp)
+def test_sensitive_mask_marks_requested_grid_cells():
+    mask = evaluation.sensitive_mask(np.asarray([0, 24, 575], dtype=np.int32))
 
-
-def test_rank1_sanitizer_empty_isens_identity():
-    V = gen.make_synthetic_embedding(3)
-    Vp = gen.apply_rank1_sanitizer(V, np.array([], dtype=np.int32))
-    np.testing.assert_array_equal(V, Vp)
-
-
-@pytest.mark.parametrize("k", [1, 4, 8])
-def test_svd_sanitizer_shape(k):
-    V = gen.make_synthetic_embedding(10 + k)
-    isens = gen.make_isens("checkout", 10 + k)
-    Vp = gen.apply_svd_sanitizer(V, isens, k=k)
-    assert Vp.shape == (576, 1152)
-    assert Vp.dtype == np.float32
-
-
-@pytest.mark.parametrize("k", [1, 4, 8])
-def test_svd_sanitizer_modifies_embeddings(k):
-    V = gen.make_synthetic_embedding(20 + k)
-    isens = gen.make_isens("login", 20 + k)
-    Vp = gen.apply_svd_sanitizer(V, isens, k=k)
-    assert not np.allclose(V, Vp)
-
-
-def test_svd_sanitizer_with_noise():
-    V = gen.make_synthetic_embedding(50)
-    isens = gen.make_isens("checkout", 50)
-    Vp = gen.apply_svd_sanitizer(V, isens, k=1, alpha=0.1)
-    assert Vp.shape == (576, 1152)
-
-
-def test_svd_sanitizer_higher_k_more_mse():
-    """Higher k removes more components → larger L2 diff from original."""
-    V = gen.make_synthetic_embedding(99)
-    isens = gen.make_isens("login", 99)[:20]
-    mses = []
-    for k in [1, 4, 8]:
-        Vp = gen.apply_svd_sanitizer(V, isens, k=k)
-        mses.append(float(np.mean((V - Vp)**2)))
-    # Monotonically non-decreasing
-    assert mses[0] <= mses[1] + 0.01
-    assert mses[1] <= mses[2] + 0.01
-
-
-# ---- Evaluation metrics -------------------------------------------------------
-
-def test_psnr_identical():
-    a = np.random.rand(100).astype(float)
-    assert ev.psnr(a, a) == 100.0
-
-
-def test_psnr_range():
-    # psnr(zeros, ones): MSE=1.0, PSNR = 20*log10(max_val/sqrt(MSE)).
-    # With max_val=1.0: PSNR = 20*log10(1/1) = 0.0 dB — this is correct by definition.
-    # For a non-trivial case use a small perturbation so PSNR > 0.
-    rng = np.random.default_rng(42)
-    a = rng.random(100)
-    b = a + rng.random(100) * 0.1   # small noise → positive PSNR
-    p = ev.psnr(a, b)
-    assert p >= 0.0        # always non-negative
-    assert p < 100.0       # not identical (which would give 100.0 sentinel)
-
-
-def test_ssim_identical():
-    a = np.random.rand(1000).astype(float)
-    s = ev.ssim(a, a)
-    assert s > 0.9
-
-
-def test_sensitive_region_mask_shape():
-    isens = np.array([0, 24, 575], dtype=np.int32)
-    mask = ev.sensitive_region_mask(isens, 224, 224)
     assert mask.shape == (224, 224)
     assert mask.dtype == bool
     assert mask.any()
+    assert mask[0, 0]
+    assert mask[9, 0]
+    assert mask[223, 223]
 
 
-def test_linear_probe_returns_valid_accuracy():
-    rng = np.random.default_rng(0)
-    X = rng.standard_normal((30, 576, 1152)).astype(np.float32)
-    y = np.arange(30)
-    acc = ev.linear_probe_accuracy(X, y)
-    assert 0.0 <= acc <= 1.0
+def test_psnr_and_ssim_are_perfect_for_identical_images():
+    image = np.random.default_rng(12).random((224, 224, 3), dtype=np.float32)
+    mask = np.ones((224, 224), dtype=bool)
+
+    assert evaluation.psnr(image, image, mask) == 100
+    assert evaluation.ssim(image, image, mask) > 0.999
+
+
+def test_character_accuracy_uses_edit_distance():
+    assert evaluation.char_accuracy("VDLM-1234", "vdlm1234") == 1
+    assert evaluation.char_accuracy("123456", "1234") < 1
+
+
+def test_digit_probe_reports_test_pages_and_chance_baseline(tmp_path: Path):
+    train_records = []
+    test_records = []
+    rng = np.random.default_rng(19)
+    for index in range(10):
+        record_path = tmp_path / f"sample_{index:02}.npz"
+        np.savez_compressed(record_path, Vprime=rng.standard_normal((576, 1152)).astype(np.float32))
+        record = {
+            "path": record_path,
+            "metadata": {"card_number": f"{index:016d}"},
+        }
+        (train_records if index < 8 else test_records).append(record)
+
+    result = evaluation.digit_probe(train_records, test_records, "Vprime")
+
+    assert result["test_pages"] == 2
+    assert result["uniform_chance"] == 0.1
+    assert 0 <= result["character_accuracy"] <= 1
+    assert 0 <= result["training_majority_baseline"] <= 1

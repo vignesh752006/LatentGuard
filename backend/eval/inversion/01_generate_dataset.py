@@ -1,276 +1,314 @@
-"""
-Task 5 — Inversion Attack Benchmark
-====================================
+"""Render pages, run real SigLIP, and save exact source-PCA wire payloads."""
 
-Stage 1: Dataset generation
-  Renders N synthetic pages (login + checkout variants) using Playwright,
-  saves screenshot, I_sens (sensitive patch indices), V (SigLIP embeddings),
-  and V' for each sanitizer config.
-
-Usage:
-  pip install playwright pillow numpy torch
-  playwright install chromium
-
-  python backend/eval/inversion/01_generate_dataset.py \\
-      --out-dir /tmp/vdlm_eval \\
-      --n 500 \\
-      --pages login checkout
-
-Data format per sample (saved as .npz):
-  sample_XXXX.npz:
-    screenshot:   uint8 [224, 224, 3]
-    isens:        int32 [n_sens]  — sensitive patch indices
-    V:            float32 [576, 1152]  — unsanitized SigLIP embedding
-    V_rank1:      float32 [576, 1152]  — rank-1 sanitized
-    V_svd_k1:     float32 [576, 1152]  — SVD k=1
-    V_svd_k4:     float32 [576, 1152]  — SVD k=4
-    V_svd_k8:     float32 [576, 1152]  — SVD k=8
-    V_svd_k1_noise: float32 [576, 1152]  — SVD k=1 + alpha=0.1
-    metadata:     json  — page_type, layout_seed, passwords, card_numbers
-"""
-
+import base64
 import argparse
 import json
-import os
 import random
+import subprocess
 import sys
+import zlib
 from pathlib import Path
 
 import numpy as np
+import onnxruntime as ort
+from PIL import Image
 
-# ---- Synthetic data generation (no Playwright needed for unit tests) ----------
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "backend"))
 
-FAKE_PASSWORDS = [
-    "P@ssw0rd!", "Secur3!2024", "Tr0ub4dor&3", "correct-horse-battery",
-    "MyP@ss123", "Hunter2!", "Qwerty!@#4", "L0gin$ecure",
-]
+from app.config.settings import Settings  # noqa: E402
+from app.encoding.source_pca import load_basis  # noqa: E402
+from app.schemas.messages import TensorPayload  # noqa: E402
+from app.tensor.serialization import contract_from_settings, decode_tensor_payload  # noqa: E402
+from eval.siglip.adapter import adapt_siglip_embeddings  # noqa: E402
 
-FAKE_CARD_NUMBERS = [
-    "4111 1111 1111 1111", "5500 0000 0000 0004", "3400 0000 0000 009",
-    "6011 1111 1111 1117", "3714 496353 98431",
-]
-
-FAKE_CVVS = ["123", "456", "789", "321", "654"]
-
-
-def make_synthetic_embedding(seed: int, patch_count: int = 576, dim: int = 1152) -> np.ndarray:
-    """Generate a deterministic synthetic embedding (stands in for SigLIP output)."""
-    rng = np.random.default_rng(seed)
-    # Simulate realistic SigLIP-like distribution: mostly gaussian + spatial structure
-    base = rng.standard_normal((patch_count, dim)).astype(np.float32)
-    # Add spatial correlation (nearby patches correlated)
-    grid = base.reshape(24, 24, dim)
-    smoothed = grid.copy()
-    for _ in range(2):
-        smoothed[1:] += grid[:-1] * 0.3
-        smoothed[:-1] += grid[1:] * 0.3
-        smoothed[:, 1:] += grid[:, :-1] * 0.3
-        smoothed[:, :-1] += grid[:, 1:] * 0.3
-    return smoothed.reshape(patch_count, dim).astype(np.float32)
+MODEL_PATH = ROOT / "client" / "public" / "models" / "siglip-base-patch16-224-vision-fp32.onnx"
+RENDER_SCRIPT = ROOT / "client" / "scripts" / "render-inversion-pages.mjs"
+MODE_CONFIGS = {
+    "none": (0, 0.0, False),
+    "rank1_alpha0": (1, 0.0, True),
+    "rank1_alpha001": (1, 0.01, True),
+    "svd_k1_alpha0": (1, 0.0, False),
+    "svd_k1_alpha001": (1, 0.01, False),
+    "svd_k4_alpha0": (4, 0.0, False),
+    "svd_k4_alpha001": (4, 0.01, False),
+    "svd_k8_alpha0": (8, 0.0, False),
+    "svd_k8_alpha001": (8, 0.01, False),
+}
 
 
-def make_isens(page_type: str, seed: int) -> np.ndarray:
-    """Return sensitive patch indices for a given page type."""
-    rng = random.Random(seed)
-    if page_type == "login":
-        # Password field roughly at rows 9-10, cols 9-18 of 24x24 grid
-        base = [(r * 24 + c) for r in range(9, 11) for c in range(9, 18)]
-    elif page_type == "checkout":
-        # Card field roughly rows 8-9, cvv rows 10-11
-        base = [(r * 24 + c) for r in range(8, 12) for c in range(9, 18)]
-    else:
-        base = list(range(0, 10))
-
-    # Add slight random variation per seed
-    jitter = [max(0, min(575, i + rng.randint(-2, 2))) for i in base]
-    return np.array(sorted(set(jitter)), dtype=np.int32)
-
-
-def apply_rank1_sanitizer(V: np.ndarray, isens: np.ndarray, alpha: float = 0.01) -> np.ndarray:
-    """NumPy rank-1 null-space sanitizer (mean-direction baseline)."""
-    if len(isens) == 0:
-        return V.copy()
-    W_sens = V[isens]  # [n_sens, D]
-    basis = W_sens.mean(axis=0)
-    norm = np.linalg.norm(basis) + 1e-8
-    basis = basis / norm
-    # Project out
-    dots = V @ basis  # [N]
-    Vprime = V - np.outer(dots, basis)
-    # Add noise
-    rng = np.random.default_rng(42)
-    noise_raw = rng.standard_normal(V.shape).astype(np.float32) * alpha
-    # Make noise orthogonal to basis
-    noise_raw -= np.outer(noise_raw @ basis, basis)
-    return (Vprime + noise_raw).astype(np.float32)
+def render_pages(out_dir: Path, count: int, seed: int) -> None:
+    existing = list(out_dir.glob("sample_*.png"))
+    if len(existing) == count:
+        return
+    subprocess.run(
+        [
+            "node",
+            str(RENDER_SCRIPT),
+            "--out-dir",
+            str(out_dir),
+            "--count",
+            str(count),
+            "--seed",
+            str(seed),
+        ],
+        cwd=ROOT / "client",
+        check=True,
+    )
 
 
-def apply_svd_sanitizer(V: np.ndarray, isens: np.ndarray, k: int = 1, alpha: float = 0.0) -> np.ndarray:
-    """NumPy SVD null-space sanitizer."""
-    if len(isens) == 0:
-        return V.copy()
-    W_sens = V[isens]  # [n_sens, D]
-    k_actual = min(k, len(isens))
-    # Thin SVD
-    _, _, Vt = np.linalg.svd(W_sens, full_matrices=False)
-    W_priv = Vt[:k_actual]  # [k, D]
-    # Project out: V' = V - V W_priv^T W_priv
-    proj = (V @ W_priv.T) @ W_priv  # [N, D]
-    Vprime = (V - proj).astype(np.float32)
-    if alpha > 0:
-        rng = np.random.default_rng(42)
-        noise = rng.standard_normal(V.shape).astype(np.float32) * alpha
-        # Orthogonalize noise w.r.t. W_priv
-        noise -= (noise @ W_priv.T) @ W_priv
-        Vprime += noise
-    return Vprime
+def image_tensor(path: Path) -> np.ndarray:
+    with Image.open(path) as image:
+        pixels = np.asarray(
+            image.convert("RGB").resize((224, 224), Image.Resampling.BILINEAR),
+            dtype=np.float32,
+        ) / 255.0
+    return ((pixels - 0.5) / 0.5).transpose(2, 0, 1)[None].astype(np.float32)
+
+
+def sanitize_source(
+    source: np.ndarray,
+    sensitive_indices: list[int],
+    rank: int,
+    alpha: float,
+    rank1_baseline: bool = False,
+    private_basis: np.ndarray | None = None,
+) -> np.ndarray:
+    if not sensitive_indices:
+        return source.copy()
+    if rank == 0:
+        return source.copy()
+    selected = source[np.asarray(sensitive_indices, dtype=np.int64)]
+    if private_basis is None:
+        if rank1_baseline:
+            mean_vector = selected.mean(axis=0)
+            vector_norm = float(np.linalg.norm(mean_vector))
+            if vector_norm <= 1e-10:
+                return source.copy()
+            private_basis = (mean_vector / vector_norm).astype(np.float32)[None, :]
+        else:
+            _, _, right_vectors = np.linalg.svd(selected, full_matrices=False)
+            private_basis = right_vectors[: min(rank, len(selected))].astype(np.float32)
+    sanitized = source - (source @ private_basis.T) @ private_basis
+    if alpha:
+        patch = np.arange(source.shape[0], dtype=np.float32)[:, None]
+        dim = np.arange(source.shape[1], dtype=np.float32)[None, :]
+        noise = (np.sin(patch * 97 + dim * 13) * np.cos(dim * 7) * alpha).astype(np.float32)
+        noise -= (noise @ private_basis.T) @ private_basis
+        sanitized += noise
+    return sanitized.astype(np.float32)
+
+
+def right_singular_vectors(rows: np.ndarray) -> np.ndarray:
+    rows64 = rows.astype(np.float64, copy=False)
+    eigenvalues, eigenvectors = np.linalg.eigh(rows64 @ rows64.T)
+    order = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
+    threshold = max(1e-12, float(eigenvalues[0]) * 1e-12)
+    keep = eigenvalues > threshold
+    if not np.any(keep):
+        return np.empty((0, rows.shape[1]), dtype=np.float32)
+    vectors = (eigenvectors[:, keep].T @ rows64) / np.sqrt(eigenvalues[keep])[:, None]
+    return vectors.astype(np.float32)
+
+
+def encode_source_pca_payload(
+    source: np.ndarray,
+    mean: np.ndarray,
+    components: np.ndarray,
+    rank: int,
+) -> bytes:
+    coefficients = (source - mean) @ components[:rank].T
+    scales = np.max(np.abs(coefficients), axis=1).astype("<f4")
+    multipliers = np.divide(
+        127.0,
+        scales.astype(np.float64),
+        out=np.zeros(scales.shape, dtype=np.float64),
+        where=scales > 0,
+    )
+    quantized = np.clip(
+        np.floor(coefficients.astype(np.float64) * multipliers[:, None] + 0.5),
+        -127,
+        127,
+    ).astype(np.int8)
+    compressed = zlib.compress(scales.tobytes() + quantized.tobytes())
+    payload = TensorPayload(
+        dtype="int8_quantized",
+        shape=[196, rank],
+        data=base64.b64encode(compressed).decode("ascii"),
+        compression="zlib",
+        transform="source_pca_v1",
+    )
+    return payload.model_dump_json(exclude_none=True).encode("utf-8")
 
 
 def generate_dataset(
     out_dir: Path,
-    n: int = 500,
-    pages: list[str] | None = None,
-    use_playwright: bool = False,
-) -> None:
-    """Generate the benchmark dataset.
-
-    With use_playwright=True: renders actual HTML pages with Playwright.
-    With use_playwright=False: generates synthetic data (for CI/unit tests).
-    """
-    if pages is None:
-        pages = ["login", "checkout"]
-
+    pages_dir: Path,
+    count: int,
+    seed: int,
+    rank: int,
+) -> dict[str, object]:
+    if not out_dir.is_absolute():
+        out_dir = ROOT / out_dir
+    if not pages_dir.is_absolute():
+        pages_dir = ROOT / pages_dir
+    if not MODEL_PATH.is_file():
+        raise FileNotFoundError(f"Missing FP32 SigLIP ONNX model: {MODEL_PATH}")
+    if not 1 <= rank <= 128:
+        raise ValueError("PCA rank must be in [1, 128]")
+    render_pages(pages_dir, count, seed)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if use_playwright:
-        _generate_with_playwright(out_dir, n, pages)
-    else:
-        _generate_synthetic(out_dir, n, pages)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 4
+    options.inter_op_num_threads = 1
+    session = ort.InferenceSession(
+        str(MODEL_PATH),
+        sess_options=options,
+        providers=["CPUExecutionProvider"],
+    )
+    input_name = session.get_inputs()[0].name
+    output_name = session.get_outputs()[0].name
+    mean, components = load_basis()
+    page_indices = list(range(count))
+    random.Random(seed).shuffle(page_indices)
+    train_count = max(1, int(count * 0.8))
+    train_indices = set(page_indices[:train_count])
+    settings = Settings()
+    contract = contract_from_settings(settings)
+    written = []
 
-
-def _generate_synthetic(out_dir: Path, n: int, pages: list[str]) -> None:
-    """Generate synthetic dataset without Playwright."""
-    rng = random.Random(0)
-    generated = 0
-
-    for i in range(n):
-        page_type = rng.choice(pages)
-        seed = i * 137 + hash(page_type) % 10000
-
-        # Synthetic screenshot (224x224 RGB noise with structure)
-        img_rng = np.random.default_rng(seed)
-        screenshot = img_rng.integers(0, 255, (224, 224, 3), dtype=np.uint8)
-
-        # Embedding
-        V = make_synthetic_embedding(seed)
-        isens = make_isens(page_type, seed)
-
-        # Apply all sanitizers
-        V_rank1 = apply_rank1_sanitizer(V, isens, alpha=0.01)
-        V_svd_k1 = apply_svd_sanitizer(V, isens, k=1, alpha=0.0)
-        V_svd_k4 = apply_svd_sanitizer(V, isens, k=4, alpha=0.0)
-        V_svd_k8 = apply_svd_sanitizer(V, isens, k=8, alpha=0.0)
-        V_svd_k1_noise = apply_svd_sanitizer(V, isens, k=1, alpha=0.1)
-
-        metadata = {
-            "page_type": page_type,
-            "seed": seed,
-            "password": rng.choice(FAKE_PASSWORDS) if page_type == "login" else None,
-            "card_number": rng.choice(FAKE_CARD_NUMBERS) if page_type == "checkout" else None,
-            "cvv": rng.choice(FAKE_CVVS) if page_type == "checkout" else None,
-        }
-
-        out_file = out_dir / f"sample_{i:04d}.npz"
-        np.savez_compressed(
-            out_file,
-            screenshot=screenshot,
-            isens=isens,
-            V=V,
-            V_rank1=V_rank1,
-            V_svd_k1=V_svd_k1,
-            V_svd_k4=V_svd_k4,
-            V_svd_k8=V_svd_k8,
-            V_svd_k1_noise=V_svd_k1_noise,
-            metadata=np.array([json.dumps(metadata)]),
-        )
-        generated += 1
-
-        if generated % 50 == 0:
-            print(f"[gen] {generated}/{n} samples generated")
-
-    print(f"[gen] Done: {generated} samples in {out_dir}")
-
-
-def _generate_with_playwright(out_dir: Path, n: int, pages: list[str]) -> None:
-    """Render pages with Playwright and extract real embeddings."""
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        print("[ERROR] playwright not installed: pip install playwright && playwright install chromium")
-        sys.exit(1)
-
-    demo_dir = Path(__file__).parent.parent.parent.parent / "demo-pages"
-
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1920, "height": 1080})
-        rng = random.Random(42)
-        generated = 0
-
-        for i in range(n):
-            page_type = rng.choice(pages)
-            html_file = demo_dir / f"{page_type}.html"
-            page.goto(f"file://{html_file.resolve()}")
-            page.wait_for_load_state("networkidle")
-
-            # Take screenshot and crop to 224x224 center
-            screenshot_bytes = page.screenshot()
-            from PIL import Image
-            import io
-            img = Image.open(io.BytesIO(screenshot_bytes)).resize((224, 224))
-            screenshot = np.array(img)[:, :, :3]
-
-            # Synthetic embedding (Playwright path: would use real ONNX in production)
-            seed = i * 137 + hash(page_type) % 10000
-            V = make_synthetic_embedding(seed)
-            isens = make_isens(page_type, seed)
-
-            V_rank1 = apply_rank1_sanitizer(V, isens)
-            V_svd_k1 = apply_svd_sanitizer(V, isens, k=1)
-            V_svd_k4 = apply_svd_sanitizer(V, isens, k=4)
-            V_svd_k8 = apply_svd_sanitizer(V, isens, k=8)
-            V_svd_k1_noise = apply_svd_sanitizer(V, isens, k=1, alpha=0.1)
-
-            metadata = {
-                "page_type": page_type,
-                "seed": seed,
-                "password": rng.choice(FAKE_PASSWORDS) if page_type == "login" else None,
-                "card_number": rng.choice(FAKE_CARD_NUMBERS) if page_type == "checkout" else None,
-            }
-
-            out_file = out_dir / f"sample_{i:04d}.npz"
-            np.savez_compressed(
-                out_file,
-                screenshot=screenshot, isens=isens, V=V,
-                V_rank1=V_rank1, V_svd_k1=V_svd_k1,
-                V_svd_k4=V_svd_k4, V_svd_k8=V_svd_k8,
-                V_svd_k1_noise=V_svd_k1_noise,
-                metadata=np.array([json.dumps(metadata)]),
+    for index in range(count):
+        basename = f"sample_{index:04d}"
+        image_path = pages_dir / f"{basename}.png"
+        metadata_path = pages_dir / f"{basename}.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        with Image.open(image_path) as image:
+            screenshot = np.asarray(
+                image.convert("RGB").resize((224, 224), Image.Resampling.BILINEAR),
+                dtype=np.uint8,
             )
-            generated += 1
-            if generated % 50 == 0:
-                print(f"[gen] {generated}/{n} Playwright samples")
+        source = session.run(
+            [output_name], {input_name: image_tensor(image_path)}
+        )[0][0].astype(np.float32)
+        if source.shape != (196, 768):
+            raise ValueError(f"Expected SigLIP source tokens [196, 768], got {source.shape}")
+        V = adapt_siglip_embeddings(source)
+        payloads: dict[str, np.ndarray] = {}
+        rebuilt_tensors: dict[str, np.ndarray] = {}
+        sensitive_indices = metadata["sensitive_source_patch_indices"]
+        private_bases: dict[tuple[int, bool], np.ndarray] = {}
+        right_vectors = None
+        if sensitive_indices:
+            selected = source[np.asarray(sensitive_indices, dtype=np.int64)]
+            right_vectors = right_singular_vectors(selected)
+        for mode, (mode_rank, alpha, rank1_baseline) in MODE_CONFIGS.items():
+            basis = None
+            if mode_rank and sensitive_indices:
+                basis_key = (mode_rank, rank1_baseline)
+                if basis_key not in private_bases:
+                    if rank1_baseline:
+                        mean_vector = selected.mean(axis=0)
+                        vector_norm = float(np.linalg.norm(mean_vector))
+                        private_bases[basis_key] = (
+                            (mean_vector / vector_norm).astype(np.float32)[None, :]
+                            if vector_norm > 1e-10
+                            else np.empty((0, source.shape[1]), dtype=np.float32)
+                        )
+                    else:
+                        if right_vectors is None:
+                            raise RuntimeError("SVD basis is unavailable for sensitive source rows")
+                        private_bases[basis_key] = right_vectors[
+                            : min(mode_rank, len(sensitive_indices))
+                        ].astype(np.float32)
+                basis = private_bases[basis_key]
+                if basis.size == 0:
+                    basis = None
+            sanitized = sanitize_source(
+                source,
+                sensitive_indices,
+                mode_rank,
+                alpha,
+                rank1_baseline,
+                basis,
+            )
+            wire_json = encode_source_pca_payload(sanitized, mean, components, rank)
+            payloads[f"wire_{mode}"] = np.frombuffer(wire_json, dtype=np.uint8)
+            payload = TensorPayload.model_validate_json(wire_json)
+            rebuilt_tensors[f"Vprime_{mode}"] = decode_tensor_payload(
+                payload,
+                contract,
+                settings.vdlm_max_tensor_elements,
+            ).numpy()
 
-        browser.close()
-    print(f"[gen] Done: {generated} samples in {out_dir}")
+        record_meta = {
+            "index": index,
+            "seed": metadata["seed"],
+            "page_type": "synthetic_checkout",
+            "card_number": metadata["card_number"],
+            "password": metadata["password"],
+            "cvv": metadata["cvv"],
+            "sensitive_boxes": metadata["sensitive_boxes"],
+            "train_val_split": "train" if index in train_indices else "validation",
+        }
+        np.savez(
+            out_dir / f"{basename}.npz",
+            screenshot=screenshot,
+            I_sens=np.asarray(metadata["sensitive_patch_indices"], dtype=np.int32),
+            V=V.astype(np.float32),
+            metadata=np.asarray(json.dumps(record_meta)),
+            **payloads,
+            **rebuilt_tensors,
+        )
+        written.append({
+            "sample": basename,
+            "split": record_meta["train_val_split"],
+            "sensitive_target_patches": len(metadata["sensitive_patch_indices"]),
+            "wire_bytes": {
+                mode: int(payloads[f"wire_{mode}"].size) for mode in MODE_CONFIGS
+            },
+        })
+        if (index + 1) % 25 == 0 or index + 1 == count:
+            print(f"[dataset] {index + 1}/{count} real SigLIP pages")
+
+    manifest = {
+        "seed": seed,
+        "page_count": count,
+        "training_pages": len(train_indices),
+        "validation_pages": count - len(train_indices),
+        "split_by_page": True,
+        "model": str(MODEL_PATH),
+        "model_bytes": MODEL_PATH.stat().st_size,
+        "onnxruntime": ort.__version__,
+        "PCA_rank": rank,
+        "wire_modes": list(MODE_CONFIGS),
+        "samples": written,
+    }
+    (out_dir / "dataset-manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out-dir", type=Path, default=ROOT / "backend/eval/inversion/runs/data")
+    parser.add_argument("--pages-dir", type=Path, default=ROOT / "backend/eval/inversion/runs/pages")
+    parser.add_argument("--n", type=int, default=500)
+    parser.add_argument("--seed", type=int, default=26171)
+    parser.add_argument("--pca-rank", type=int, default=64)
+    args = parser.parse_args()
+    if args.n < 2:
+        parser.error("--n must be at least 2 for a page-level train/validation split")
+    manifest = generate_dataset(args.out_dir, args.pages_dir, args.n, args.seed, args.pca_rank)
+    print(
+        f"[dataset] wrote {manifest['page_count']} samples "
+        f"({manifest['training_pages']} train, {manifest['validation_pages']} validation)"
+    )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--out-dir", default="/tmp/vdlm_eval")
-    parser.add_argument("--n", type=int, default=500)
-    parser.add_argument("--pages", nargs="+", default=["login", "checkout"])
-    parser.add_argument("--playwright", action="store_true")
-    args = parser.parse_args()
-    generate_dataset(Path(args.out_dir), args.n, args.pages, args.playwright)
-
+    main()

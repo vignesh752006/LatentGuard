@@ -126,11 +126,35 @@ resistance to inversion.
 The 10-page CI smoke test passed with a fixed seed, real SigLIP ONNX
 embeddings, an 8/2 page-level train/validation split, and two decoder epochs.
 It trained the unmodified `V` and `Vprime_svd_k4_alpha001` decoder paths.
-EasyOCR was explicitly skipped. This proves the selected pipeline paths run;
-it does not measure held-out PSNR, SSIM, OCR accuracy, digit-string accuracy,
-or whether `V'` remains invertible. Full 500-page dataset generation is
-underway; the full decoder evaluation has not yet run, so no full-benchmark
-results are claimed here.
+EasyOCR was explicitly skipped. This proves the selected pipeline paths run.
+
+The full dataset now contains 500 Playwright-rendered pages, split by page into
+400 training and 100 held-out pages. It used the real FP32 SigLIP ONNX model
+(343,344,204 bytes), the rank-64 source-PCA wire form, per-row int8, zlib, and
+the backend decoder to rebuild `[576,1152]`. A ridge digit probe was run on
+global-mean latent features, with 100 held-out pages (1,600 digit characters),
+lambda `1.0`, and a uniform-character chance baseline of `0.100`:
+
+| Representation | Held-out digit character accuracy |
+|---|---:|
+| V (unsanitized) | 0.125000 |
+| None sanitizer / PCA+wire only | 0.110625 |
+| Rank-1 baseline, alpha 0 | 0.120000 |
+| Rank-1 baseline, alpha 0.01 | 0.118125 |
+| SVD k=1, alpha 0 | 0.113125 |
+| SVD k=1, alpha 0.01 | 0.110625 |
+| SVD k=4, alpha 0 | 0.107500 |
+| SVD k=4, alpha 0.01 | 0.109375 |
+| SVD k=8, alpha 0 | 0.110000 |
+| SVD k=8, alpha 0.01 | 0.112500 |
+
+The held-out training-majority baseline was `0.098750`; uniform chance was
+`0.100`. These values are from one simple global-mean ridge probe, not a
+trained convolutional decoder or a statistical privacy test. The full-split
+`V` and configured `Vprime_svd_k4_alpha001` decoder runs are in progress.
+Held-out PSNR, SSIM, EasyOCR accuracy, and the remaining per-sanitizer decoder
+results are not yet measured. There is not yet a conclusion about whether
+`V'` remains invertible.
 
 The SVD integration test ran on a real login screenshot through the browser
 SigLIP encoder and adapted `[576,1152]` embeddings with `k=4`, `alpha=0`, and
